@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
 // --- Global Scene & VRM State ---
 let scene, camera, renderer, controls;
@@ -23,13 +24,6 @@ const CHARACTER_META = {
     vrm: '/vrm-models/雷电将军/雷电将军.vrm',
     greeting: '浮世の諸行、すべては永遠への塵芥にすぎぬ。……我を呼んだのはそなたか？',
     chips: ['稲妻の永遠とは？', '団子牛乳はお好きですか？', '料理は得意ですか？', '一心浄土について']
-  },
-  '爱蜜莉雅': {
-    name: 'エミリア',
-    short: '莉',
-    vrm: '/vrm-models/爱蜜莉雅/爱蜜莉雅.vrm',
-    greeting: 'こんにちは！私はエミリア、ただの半エルフよ。今日もすごーくいい日になるといいわね！',
-    chips: ['パックはどこにいるの？', 'スバルとの関係は？', '王選の目標を教えて', 'すごーく嬉しいことある？']
   },
   '喜多郁代': {
     name: '喜多郁代',
@@ -80,8 +74,33 @@ let currentEmotionHeadPitch = 0.0;
 let interactionResetTimeout = null;
 let lastInteractionTime = 0;
 const CLICK_COOLDOWN_MS = 500;
+const AUTO_GREETING_ON_LOAD = true; // 模型与官方动作就绪后自动播放一次打招呼动作
 const clickRaycaster = new THREE.Raycaster();
 const clickMouse = new THREE.Vector2();
+
+// --- VRMA Motion System State ---
+let currentAnimationMixer = null;
+let currentIdleAction = null;
+let currentMotionAction = null;
+let currentMotionFinishedHandler = null;
+const loadedVrmAnimations = {}; // 缓存解析后的原始 VRMAnimation 数据
+const activeMotionClips = {};   // 绑定到当前角色骨骼上的 THREE.AnimationClip
+
+// 外部 .vrma 动作清单：文件存在则优先使用官方动捕，缺失时由程序化骨骼曲线保底。
+// 资源目录挂在 /vrm 下，故使用相对路径。
+const MOTION_URLS = {
+  'idle': './motions/idle_loop.vrma',           // Pixiv/ChatVRM 官方待机循环
+  'greeting': './motions/greeting.vrma',        // Pixiv VRoid Project 官方动捕 (BOOTH 免费包)
+  'VRMA_01': './motions/VRMA_01.vrma',          // 官方包原始文件 (与 greeting 同源)
+  'wave_hand': './motions/wave_hand.vrma',      // 缺省时走程序化
+  'shake_head': './motions/shake_head.vrma',
+  'gentle_nod': './motions/gentle_nod.vrma',
+  'cheerful_bounce': './motions/cheerful_bounce.vrma',
+  'shy_tilt': './motions/shy_tilt.vrma',
+  'surprise_jump': './motions/surprise_jump.vrma',
+  'pout_turn': './motions/pout_turn.vrma'
+};
+
 
 // WebSocket
 let ws = null;
@@ -127,8 +146,9 @@ function initScene() {
   renderer.setSize(width, height);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.08;
+  // MToon 是卡通着色，贴图颜色本身即最终风格化结果。电影级色调映射会压缩浅色贴图的对比度，
+  // 把脸部与五官细节一并洗成白色（three-vrm 官方示例同样不使用 tone mapping）。
+  renderer.toneMapping = THREE.NoToneMapping;
   container.appendChild(renderer.domElement);
 
   // OrbitControls
@@ -141,19 +161,20 @@ function initScene() {
   controls.maxPolarAngle = Math.PI / 2 + 0.1;
 
   // Lighting tailored for MToon cel-shading:
-  // Directional lights must cast light onto character front to keep face brightly lit
-  const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
+  // MToon 的明暗是二阶跃函数，光照过强会让模型处处落在亮部、失去层次而显得发白，
+  // 因此总量控制在 ~2.4（原先 4.4 会明显过曝，尤其是浅色贴图模型）。
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
   scene.add(ambientLight);
 
-  const mainLight = new THREE.DirectionalLight(0xfff7ed, 1.6);
+  const mainLight = new THREE.DirectionalLight(0xfff7ed, 1.2);
   mainLight.position.set(0.8, 2.2, 2.0).normalize();
   scene.add(mainLight);
 
-  const fillLight = new THREE.DirectionalLight(0xebe4ff, 0.9);
+  const fillLight = new THREE.DirectionalLight(0xebe4ff, 0.45);
   fillLight.position.set(-1.2, 1.8, 1.5).normalize();
   scene.add(fillLight);
 
-  const rimLight = new THREE.DirectionalLight(0xffd6e0, 0.7);
+  const rimLight = new THREE.DirectionalLight(0xffd6e0, 0.35);
   rimLight.position.set(0, 2.0, -2.0).normalize();
   scene.add(rimLight);
 
@@ -222,6 +243,7 @@ async function loadVRM(url, characterName = '') {
 
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMLoaderPlugin(parser));
+  loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
 
   loader.load(
     url,
@@ -237,6 +259,10 @@ async function loadVRM(url, characterName = '') {
       }
 
       if (currentVrm) {
+        if (currentAnimationMixer) {
+          currentAnimationMixer.stopAllAction();
+          currentAnimationMixer = null;
+        }
         scene.remove(currentVrm.scene);
         VRMUtils.deepDispose(currentVrm.scene);
       }
@@ -254,6 +280,9 @@ async function loadVRM(url, characterName = '') {
       if (vrm.lookAt) {
         vrm.lookAt.target = camera;
       }
+
+      // 初始化并绑定当前角色的 VRMA 动作系统与 Mixer
+      setupMotionMixer(vrm);
 
       console.log('✅ VRM model loaded:', vrm);
 
@@ -408,6 +437,21 @@ function playNextAudio() {
   if (item.expressions && item.expressions.length > 0) {
     const exp = item.expressions[0];
     setEmotion(exp, 0.85);
+
+    // 对话情绪与全身肢体动作联动
+    const motionMap = {
+      'happy': 'cheerful_bounce',
+      'joy': 'cheerful_bounce',
+      'surprised': 'surprise_jump',
+      'surprise': 'surprise_jump',
+      'relaxed': 'gentle_nod',
+      'angry': 'pout_turn'
+    };
+    const cleanKey = String(exp).toLowerCase().replace(/[\[\]]/g, '');
+    const targetMotion = motionMap[cleanKey] || motionMap[exp];
+    if (targetMotion) {
+      playMotion(targetMotion);
+    }
   }
 
   const source = audioContext.createBufferSource();
@@ -556,9 +600,13 @@ function updateBlink(delta) {
   }
 }
 
-// Idle breathing & micro-sway
+// Idle breathing & micro-sway (fallback when no VRMA idle loop is playing)
 function updateIdle(elapsedTime) {
   if (!currentVrm || !currentVrm.humanoid) return;
+  // 当 VRMA 动作系统正在通过 AnimationMixer 播放动画时，骨骼由动画混合器全权驱动
+  if (currentAnimationMixer && ((currentIdleAction && currentIdleAction.isRunning()) || currentMotionAction)) {
+    return;
+  }
   const t = elapsedTime;
   const breath = Math.sin(t * 1.8) * 0.016;
 
@@ -585,7 +633,7 @@ function updateIdle(elapsedTime) {
 }
 
 // --- 4.1 Interactive Touch & Motion System ---
-// 随机触碰反馈池 (表情 + 预留动作)
+// 随机触碰反馈池 (表情 + 动作联动)
 const CLICK_REACTIONS = [
   { emotion: 'happy', weight: 0.95, motion: 'cheerful_bounce', duration: 2400 },
   { emotion: 'surprised', weight: 0.90, motion: 'surprise_jump', duration: 2000 },
@@ -594,19 +642,343 @@ const CLICK_REACTIONS = [
 ];
 
 /**
- * 预留动作播放接口 (Motion Integration Interface)
- * 当前前端尚未搭载完整肢体动作播放器，待动作模块升级后接入 Three.js AnimationMixer 播放 FBX/BVH 动作。
- * 架构参考升级路线规划: doc/motion_upgrade_roadmap.md
- * 
+ * 按 URL 解析并缓存 VRMA 文件 (同一文件被多个动作名引用时只下载/解析一次)
+ */
+const vrmAnimationCache = {};   // url -> VRMAnimation | null
+const vrmAnimationPending = {}; // url -> Promise
+
+async function fetchVrmAnimation(url) {
+  if (!vrmAnimationPending[url]) {
+    vrmAnimationPending[url] = (async () => {
+      try {
+        const res = await fetch(url, { method: 'HEAD' });
+        if (!res.ok) {
+          console.debug(`[Motion] 动作文件 ${url} 暂未就绪 (HTTP ${res.status})`);
+          return null;
+        }
+        const loader = new GLTFLoader();
+        loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+        const gltf = await loader.loadAsync(url);
+        const vrmAnim = gltf.userData.vrmAnimations?.[0] || gltf.userData.vrmAnimation;
+        if (vrmAnim) {
+          console.log(`✅ [Motion] 成功载入 VRMA 动作文件: ${url}`);
+          return vrmAnim;
+        }
+      } catch (err) {
+        console.debug(`[Motion] 加载动作 ${url} 跳过:`, err.message);
+      }
+      return null;
+    })();
+  }
+
+  if (vrmAnimationCache[url] === undefined) {
+    vrmAnimationCache[url] = await vrmAnimationPending[url];
+  }
+  return vrmAnimationCache[url];
+}
+
+/**
+ * 加载单个动作名对应的 .vrma 文件，并绑定到当前角色骨骼
+ */
+async function loadVrmaFile(name, url) {
+  const vrmAnim = await fetchVrmAnimation(url);
+  if (!vrmAnim) return null;
+
+  loadedVrmAnimations[name] = vrmAnim;
+  console.debug(`[Motion] 注册动作: ${name}`);
+
+  if (currentVrm) {
+    try {
+      activeMotionClips[name] = createVRMAnimationClip(vrmAnim, currentVrm);
+    } catch (e) {
+      console.warn(`[Motion] 为当前角色生成 Clip 失败 (${name}):`, e);
+    }
+  }
+  return vrmAnim;
+}
+
+/**
+ * 预加载所有已配置的 VRMA 动作
+ */
+async function preloadAllVrmaMotions() {
+  const promises = Object.entries(MOTION_URLS).map(([name, url]) => loadVrmaFile(name, url));
+  await Promise.allSettled(promises);
+  if (currentVrm && !currentIdleAction) {
+    playIdleMotion();
+  }
+  maybeAutoGreeting();
+}
+
+/**
+ * 模型与官方动作都就绪后，自动播放一次打招呼动作 (每次加载模型仅一次)
+ */
+let autoGreetingDone = false;
+function maybeAutoGreeting() {
+  if (!AUTO_GREETING_ON_LOAD || autoGreetingDone) return;
+  if (!currentAnimationMixer || !activeMotionClips['greeting']) return;
+  autoGreetingDone = true;
+  playMotion('greeting');
+}
+
+/**
+ * 为新载入的 VRM 模型初始化动作混合器 AnimationMixer 并重定向动作 Clip
+ */
+function setupMotionMixer(vrm) {
+  if (!vrm) return;
+  if (currentAnimationMixer) {
+    currentAnimationMixer.stopAllAction();
+  }
+  currentAnimationMixer = new THREE.AnimationMixer(vrm.scene);
+  currentIdleAction = null;
+  currentMotionAction = null;
+  autoGreetingDone = false;
+
+  // 清空之前角色的 clip 映射
+  for (const k in activeMotionClips) delete activeMotionClips[k];
+
+  // 绑定所有已载入的 VRMA 动作
+  for (const [name, vrmAnim] of Object.entries(loadedVrmAnimations)) {
+    try {
+      activeMotionClips[name] = createVRMAnimationClip(vrmAnim, vrm);
+    } catch (e) {
+      console.warn(`[Motion] 为新角色生成动作 clip 失败 (${name}):`, e);
+    }
+  }
+
+  // 生成程序化备用动画 (防止个别 .vrma 文件缺失时无动作)
+  ensureProceduralMotionClips(vrm);
+
+  // 启动常驻待机动作
+  playIdleMotion();
+
+  // 切换角色后重新打一次招呼 (仅当官方动作已就绪)
+  maybeAutoGreeting();
+}
+
+/**
+ * 当部分动作文件缺失时，生成高品质程序化 VRM 人形骨骼关键帧动画作为保底
+ */
+function ensureProceduralMotionClips(vrm) {
+  if (!vrm || !vrm.humanoid) return;
+  const h = vrm.humanoid;
+  const headNode = h.getNormalizedBoneNode('head');
+  const chestNode = h.getNormalizedBoneNode('chest');
+  const hipsNode = h.getNormalizedBoneNode('hips');
+
+  // 以当前 rest 姿态 (applyNaturalPose 之后的自然站姿) 为基准生成旋转关键帧轨道
+  const rotTrack = (node, times, eulers) => {
+    const qRest = node.quaternion.clone();
+    const values = [];
+    for (const [x, y, z] of eulers) {
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z)).multiply(qRest);
+      values.push(...q.toArray());
+    }
+    return new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, times, values);
+  };
+
+  // 1. cheerful_bounce (欢快跳跃/雀跃)
+  if (!activeMotionClips['cheerful_bounce'] && hipsNode) {
+    const tracks = [];
+    const restHipsY = hipsNode.position.y;
+    tracks.push(new THREE.VectorKeyframeTrack(
+      `${hipsNode.name}.position`,
+      [0.0, 0.25, 0.55, 0.85, 1.2, 1.5],
+      [
+        hipsNode.position.x, restHipsY, hipsNode.position.z,
+        hipsNode.position.x, restHipsY + 0.04, hipsNode.position.z,
+        hipsNode.position.x, restHipsY - 0.005, hipsNode.position.z,
+        hipsNode.position.x, restHipsY + 0.025, hipsNode.position.z,
+        hipsNode.position.x, restHipsY, hipsNode.position.z,
+        hipsNode.position.x, restHipsY, hipsNode.position.z
+      ]
+    ));
+    if (headNode) {
+      const qRest = headNode.quaternion.clone();
+      const qTilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.06, 0, 0.03)).multiply(qRest);
+      tracks.push(new THREE.QuaternionKeyframeTrack(
+        `${headNode.name}.quaternion`,
+        [0.0, 0.3, 0.6, 1.0, 1.5],
+        [...qRest.toArray(), ...qTilt.toArray(), ...qRest.toArray(), ...qTilt.toArray(), ...qRest.toArray()]
+      ));
+    }
+    activeMotionClips['cheerful_bounce'] = new THREE.AnimationClip('cheerful_bounce', 1.5, tracks);
+  }
+
+  // 2. surprise_jump (受惊后缩)
+  if (!activeMotionClips['surprise_jump'] && hipsNode) {
+    const tracks = [];
+    const restHipsY = hipsNode.position.y;
+    const restHipsZ = hipsNode.position.z;
+    tracks.push(new THREE.VectorKeyframeTrack(
+      `${hipsNode.name}.position`,
+      [0.0, 0.15, 0.5, 0.9, 1.4],
+      [
+        hipsNode.position.x, restHipsY, restHipsZ,
+        hipsNode.position.x, restHipsY + 0.02, restHipsZ - 0.035,
+        hipsNode.position.x, restHipsY, restHipsZ - 0.02,
+        hipsNode.position.x, restHipsY, restHipsZ,
+        hipsNode.position.x, restHipsY, restHipsZ
+      ]
+    ));
+    if (headNode) {
+      const qRest = headNode.quaternion.clone();
+      const qBack = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.08, 0, 0)).multiply(qRest);
+      tracks.push(new THREE.QuaternionKeyframeTrack(
+        `${headNode.name}.quaternion`,
+        [0.0, 0.15, 0.5, 1.0, 1.4],
+        [...qRest.toArray(), ...qBack.toArray(), ...qBack.toArray(), ...qRest.toArray(), ...qRest.toArray()]
+      ));
+    }
+    activeMotionClips['surprise_jump'] = new THREE.AnimationClip('surprise_jump', 1.4, tracks);
+  }
+
+  // 3. gentle_nod (温柔点头)
+  if (!activeMotionClips['gentle_nod'] && headNode) {
+    const tracks = [];
+    const qRest = headNode.quaternion.clone();
+    const qNod1 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.09, 0, 0)).multiply(qRest);
+    const qNod2 = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.06, 0, 0)).multiply(qRest);
+    tracks.push(new THREE.QuaternionKeyframeTrack(
+      `${headNode.name}.quaternion`,
+      [0.0, 0.35, 0.7, 1.05, 1.4, 1.7],
+      [...qRest.toArray(), ...qNod1.toArray(), ...qRest.toArray(), ...qNod2.toArray(), ...qRest.toArray(), ...qRest.toArray()]
+    ));
+    activeMotionClips['gentle_nod'] = new THREE.AnimationClip('gentle_nod', 1.7, tracks);
+  }
+
+  // 4. pout_turn (傲娇侧身)
+  if (!activeMotionClips['pout_turn'] && headNode) {
+    const tracks = [];
+    const qRest = headNode.quaternion.clone();
+    const qTurn = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.05, 0.22, 0.03)).multiply(qRest);
+    tracks.push(new THREE.QuaternionKeyframeTrack(
+      `${headNode.name}.quaternion`,
+      [0.0, 0.25, 0.8, 1.2, 1.5],
+      [...qRest.toArray(), ...qTurn.toArray(), ...qTurn.toArray(), ...qRest.toArray(), ...qRest.toArray()]
+    ));
+    activeMotionClips['pout_turn'] = new THREE.AnimationClip('pout_turn', 1.5, tracks);
+  }
+
+  // 5. wave_hand (轻柔摆手 / 招手问候)
+  if (!activeMotionClips['wave_hand']) {
+    const rUpperArm = h.getNormalizedBoneNode('rightUpperArm');
+    const rLowerArm = h.getNormalizedBoneNode('rightLowerArm');
+    if (rUpperArm && rLowerArm) {
+      const tracks = [
+        // 右臂抬起维持在身侧上方，收尾回落
+        rotTrack(rUpperArm, [0.0, 0.35, 2.35, 2.7], [
+          [0, 0, 0], [-0.12, 0, -0.95], [-0.12, 0, -0.95], [0, 0, 0]
+        ]),
+        // 前臂来回摆动，形成挥手节奏
+        rotTrack(rLowerArm, [0.0, 0.5, 0.95, 1.4, 1.85, 2.3], [
+          [0, 0, 0], [-0.35, 0, 0.32], [-0.35, 0, -0.34], [-0.35, 0, 0.32], [-0.35, 0, -0.28], [0, 0, 0]
+        ])
+      ];
+      if (headNode) {
+        tracks.push(rotTrack(headNode, [0.0, 0.45, 2.3, 2.7], [
+          [0, 0, 0], [0.02, -0.14, 0.08], [0.02, -0.14, 0.08], [0, 0, 0]
+        ]));
+      }
+      activeMotionClips['wave_hand'] = new THREE.AnimationClip('wave_hand', 2.7, tracks);
+    }
+  }
+
+  // 6. shake_head (轻轻摇头 / 否定)
+  if (!activeMotionClips['shake_head'] && headNode) {
+    const tracks = [rotTrack(headNode, [0.0, 0.25, 0.6, 0.95, 1.3, 1.65], [
+      [0, 0, 0], [0.03, -0.20, 0.02], [0.03, 0.20, -0.02], [0.03, -0.16, 0.02], [0.03, 0.14, -0.02], [0, 0, 0]
+    ])];
+    if (chestNode) {
+      tracks.push(rotTrack(chestNode, [0.0, 0.6, 1.3, 1.65], [
+        [0, 0, 0], [0, -0.05, 0], [0, 0.05, 0], [0, 0, 0]
+      ]));
+    }
+    activeMotionClips['shake_head'] = new THREE.AnimationClip('shake_head', 1.65, tracks);
+  }
+
+  // 7. shy_tilt (歪头害羞)
+  if (!activeMotionClips['shy_tilt'] && headNode) {
+    const tracks = [rotTrack(headNode, [0.0, 0.6, 1.6, 2.2], [
+      [0, 0, 0], [0.12, 0.06, 0.26], [0.12, 0.06, 0.26], [0, 0, 0]
+    ])];
+    if (chestNode) {
+      tracks.push(rotTrack(chestNode, [0.0, 0.6, 1.6, 2.2], [
+        [0, 0, 0], [0.03, 0, 0.06], [0.03, 0, 0.06], [0, 0, 0]
+      ]));
+    }
+    activeMotionClips['shy_tilt'] = new THREE.AnimationClip('shy_tilt', 2.2, tracks);
+  }
+}
+
+/**
+ * 播放常驻待机动作 (Idle Loop)
+ */
+function playIdleMotion() {
+  if (!currentAnimationMixer) return;
+  const clip = activeMotionClips['idle'];
+  if (!clip) return;
+
+  if (currentIdleAction) {
+    currentIdleAction.stop();
+  }
+  currentIdleAction = currentAnimationMixer.clipAction(clip);
+  currentIdleAction.setLoop(THREE.LoopRepeat);
+  currentIdleAction.setEffectiveWeight(1.0);
+  currentIdleAction.fadeIn(0.4).play();
+}
+
+/**
+ * 播放指定动作并平滑过渡回待机 (One-shot Action with Crossfade)
  * @param {string} motionName - 动作标识 (如 'cheerful_bounce', 'surprise_jump')
  */
 function playMotion(motionName) {
-  console.log(`[Interaction] 触发动作: ${motionName} (当前肢体动作系统待接入，已触发预留接口)`);
-  // TODO: 后续接入动作骨骼动画控制器时启用:
-  // if (currentAnimationMixer && motionClips[motionName]) {
-  //   const action = currentAnimationMixer.clipAction(motionClips[motionName]);
-  //   action.reset().fadeIn(0.2).play();
-  // }
+  if (!currentAnimationMixer) return;
+  const clip = activeMotionClips[motionName];
+  if (!clip) {
+    console.debug(`[Motion] 动作 ${motionName} 未找到对应动画片段`);
+    return;
+  }
+
+  console.log(`[Motion] ▶ 播放肢体动作: ${motionName}`);
+
+  // 打断尚未结束的上一个动作，避免监听器泄漏与权重叠加
+  if (currentMotionAction) {
+    if (currentMotionFinishedHandler) {
+      currentAnimationMixer.removeEventListener('finished', currentMotionFinishedHandler);
+      currentMotionFinishedHandler = null;
+    }
+    currentMotionAction.stop();
+    currentMotionAction = null;
+  }
+
+  const action = currentAnimationMixer.clipAction(clip);
+  action.stop();
+  action.reset();
+  action.setLoop(THREE.LoopOnce, 1);
+  action.clampWhenFinished = true;
+  action.setEffectiveWeight(1.0);
+
+  if (currentIdleAction) {
+    action.crossFadeFrom(currentIdleAction, 0.25, false);
+  } else {
+    action.fadeIn(0.25);
+  }
+
+  action.play();
+  currentMotionAction = action;
+
+  const onFinished = (e) => {
+    if (e.action !== action) return;
+    currentAnimationMixer.removeEventListener('finished', onFinished);
+    if (currentMotionFinishedHandler === onFinished) currentMotionFinishedHandler = null;
+    if (currentMotionAction !== action) return; // 已被新动作接管，不再干预 idle
+    currentMotionAction = null;
+    if (currentIdleAction) {
+      currentIdleAction.reset().setEffectiveWeight(1.0).fadeIn(0.35).play();
+    }
+  };
+  currentMotionFinishedHandler = onFinished;
+  currentAnimationMixer.addEventListener('finished', onFinished);
 }
 
 /**
@@ -634,10 +1006,6 @@ function playVoiceReaction(hitPart, characterName) {
     '雷电将军': {
       head: ['……休得无礼。', '这便是……触碰的感觉么。', '……'],
       body: ['何事？', '此身即是永恒，莫要随意动手动脚。', '雷霆之威，不可轻亵。']
-    },
-    '爱蜜莉雅': {
-      head: ['ふふ、ありがとう！', 'すごーく嬉しいかも！', 'えへへ、ちょっと照れるわね。'],
-      body: ['きゃっ！急にどうしたの？', 'もう、びっくりさせないでよ。', 'パック、見てるかしら……？']
     },
     '依蕾娜': {
       head: ['ふふっ、美しい魔女の髪に触れたい気持ちは分かります。', 'あまり撫でると、料金をいただきますよ？'],
@@ -1025,6 +1393,21 @@ function bindEvents() {
     });
   }
 
+  // 动作演示下拉：选中即播放一次对应肢体动作，随后自动回落到待机
+  const motionSelect = document.getElementById('motion-select');
+  if (motionSelect) {
+    motionSelect.addEventListener('change', (e) => {
+      const motionName = e.target.value;
+      if (!motionName) return;
+      if (currentAnimationMixer) {
+        playMotion(motionName);
+      } else {
+        console.warn('[Motion] 角色模型尚未就绪，暂时无法播放动作');
+      }
+      e.target.value = '';
+    });
+  }
+
   document.querySelectorAll('.chip').forEach((chip) => {
     chip.addEventListener('click', () => {
       const text = chip.getAttribute('data-text');
@@ -1032,816 +1415,61 @@ function bindEvents() {
     });
   });
 
-  // Settings button
+  // 全局设置按钮 —— 拉起**独立全局设置窗口**
   const btnSettings = document.getElementById('btn-settings');
   if (btnSettings) {
-    btnSettings.addEventListener('click', openSettingsModal);
+    btnSettings.addEventListener('click', () => openSettingsWindow('settings'));
   }
 
-  // Settings modal close triggers
-  const btnCloseSettings = document.getElementById('btn-close-settings');
-  if (btnCloseSettings) btnCloseSettings.addEventListener('click', closeSettingsModal);
-  const btnCancelSettings = document.getElementById('btn-cancel-settings');
-  if (btnCancelSettings) btnCancelSettings.addEventListener('click', closeSettingsModal);
-  const settingsBackdrop = document.getElementById('settings-backdrop');
-  if (settingsBackdrop) settingsBackdrop.addEventListener('click', closeSettingsModal);
-
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeSettingsModal();
-  });
-
-  // Settings Save button
-  const btnSaveSettings = document.getElementById('btn-save-settings');
-  if (btnSaveSettings) btnSaveSettings.addEventListener('click', saveAllSettings);
-
-  // Settings Tab Switching
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const targetTab = btn.getAttribute('data-tab');
-      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-      document.querySelectorAll('.tab-pane').forEach((p) => p.classList.remove('active'));
-      btn.classList.add('active');
-      const pane = document.getElementById(targetTab);
-      if (pane) pane.classList.add('active');
-    });
-  });
-
-  // Target Character select change in settings
-  const settingCharSelect = document.getElementById('setting-char-select');
-  if (settingCharSelect) {
-    settingCharSelect.addEventListener('change', async (e) => {
-      const f = e.target.value;
-      if (f) {
-        const confRes = await fetch(`/api/settings/config?character=${encodeURIComponent(f)}`);
-        if (confRes.ok) {
-          settingsData.config = await confRes.json();
-          renderSettingsUI(false);
-        }
-      }
-    });
+  // 角色设置按钮 —— 拉起**独立角色设置窗口**
+  const btnCharacter = document.getElementById('btn-character');
+  if (btnCharacter) {
+    btnCharacter.addEventListener('click', () => openSettingsWindow('character'));
   }
-
-  // LLM Provider Presets change
-  const providerPreset = document.getElementById('llm-provider-preset');
-  if (providerPreset) {
-    providerPreset.addEventListener('change', (e) => {
-      onProviderPresetChange(e.target.value);
-    });
-  }
-
-  // Base URL Real-time Validation (/v1 enforcement)
-  const baseUrlInput = document.getElementById('llm-base-url');
-  if (baseUrlInput) {
-    baseUrlInput.addEventListener('input', () => {
-      checkBaseUrlWarning(baseUrlInput.value);
-    });
-    baseUrlInput.addEventListener('blur', () => {
-      baseUrlInput.value = validateAndCleanBaseUrl(baseUrlInput.value);
-      checkBaseUrlWarning(baseUrlInput.value);
-    });
-  }
-
-  // Temperature Slider Sync
-  const tempInput = document.getElementById('llm-temperature');
-  const tempVal = document.getElementById('temp-val');
-  if (tempInput && tempVal) {
-    tempInput.addEventListener('input', () => {
-      tempVal.textContent = tempInput.value;
-    });
-  }
-
-  // Breath Scale Sync
-  const breathInput = document.getElementById('vrm-breath-scale');
-  const breathVal = document.getElementById('breath-val');
-  if (breathInput && breathVal) {
-    breathInput.addEventListener('input', () => {
-      breathVal.textContent = `${breathInput.value}x`;
-    });
-  }
-
-  // TTS Engine Select Toggle
-  const ttsEngineSelect = document.getElementById('tts-engine-select');
-  if (ttsEngineSelect) {
-    ttsEngineSelect.addEventListener('change', (e) => {
-      toggleTtsPanel(e.target.value);
-    });
-  }
-
-  // Password View Toggles
-  bindPasswordToggle('btn-toggle-llm-key', 'llm-api-key');
-  bindPasswordToggle('btn-toggle-fish-key', 'fish-api-key');
-
-  // Background Select
-  const bgSelect = document.getElementById('vrm-bg-select');
-  if (bgSelect) {
-    bgSelect.addEventListener('change', (e) => {
-      applyBackgroundTheme(e.target.value);
-    });
-  }
-
-  // Storage Migration actions
-  bindStorageActions();
-  bindFieldResetHandlers();
 
   // Global user gesture unlock for Web Audio
   document.body.addEventListener('click', () => ensureAudioContext(), { once: true });
-}
 
-// --- 9. Settings Management & DPAPI Vault Logic ---
-let settingsData = {
-  providers: null,
-  config: null,
-  keysStatus: {},
-  storagePath: null,
-};
-
-async function openSettingsModal() {
-  const modal = document.getElementById('settings-modal');
-  if (!modal) return;
-  modal.classList.remove('hidden');
-  await loadSettingsFromServer();
-}
-
-function closeSettingsModal() {
-  const modal = document.getElementById('settings-modal');
-  if (modal) modal.classList.add('hidden');
-  const statusMsg = document.getElementById('save-status-msg');
-  if (statusMsg) statusMsg.textContent = '';
-  const storageOp = document.getElementById('storage-op-status');
-  if (storageOp) storageOp.className = 'storage-status-banner hidden';
-}
-
-async function loadSettingsFromServer() {
-  try {
-    const provRes = await fetch('/api/settings/providers');
-    if (provRes.ok) settingsData.providers = await provRes.json();
-
-    const keysRes = await fetch('/api/settings/keys');
-    if (keysRes.ok) {
-      const kd = await keysRes.json();
-      settingsData.keysStatus = kd.status || {};
+  // 监听独立设置窗口的保存通知。
+  // storage 事件只在**其他窗口**改动同一 key 时触发，正好符合"设置窗口保存 -> 主视口刷新"的场景。
+  window.addEventListener('storage', (e) => {
+    if (e.key !== 'vtuber:settings-updated' || !e.newValue) return;
+    console.info('[Settings] 检测到设置窗口已保存，正在重载当前角色配置…');
+    const file = configSelect ? configSelect.value : null;
+    if (file && ws && ws.readyState === WebSocket.OPEN) {
+      // 复用 switch-config：后端会按最新 conf.yaml / 角色 yaml 重建 agent 与 TTS
+      ws.send(JSON.stringify({ type: 'switch-config', file }));
     }
-
-    const storageRes = await fetch('/api/settings/storage-path');
-    if (storageRes.ok) {
-      settingsData.storagePath = await storageRes.json();
-    }
-
-    const currentCharFile = configSelect ? configSelect.value : 'zh_由比滨结衣.yaml';
-    const confRes = await fetch(`/api/settings/config?character=${encodeURIComponent(currentCharFile)}`);
-    if (confRes.ok) settingsData.config = await confRes.json();
-
-    renderSettingsUI(true);
-  } catch (err) {
-    console.error('Failed to load settings:', err);
-  }
-}
-
-function renderSettingsUI(updateCharDropdown = true) {
-  if (!settingsData.config) return;
-  const cfg = settingsData.config;
-  const defaults = cfg.defaults || {};
-  const userOverrides = cfg.user_overrides || {};
-  const memoryOverrides = cfg.memory_overrides || {};
-
-  // Populate Character dropdown
-  const charSelect = document.getElementById('setting-char-select');
-  if (updateCharDropdown && charSelect && cfg.character_files) {
-    charSelect.innerHTML = '';
-    cfg.character_files.forEach((f) => {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f.replace('.yaml', '').replace('zh_', '');
-      if (f === cfg.target_character) opt.selected = true;
-      charSelect.appendChild(opt);
-    });
-  }
-
-  const charConfig = (cfg.character_conf && cfg.character_conf.character_config) || {};
-  const agentConfig = charConfig.agent_config || {};
-  const basicAgent = (agentConfig.agent_settings && agentConfig.agent_settings.basic_memory_agent) || {};
-  const llmSettings = (basicAgent.llm_settings && basicAgent.llm_settings.openai_compatible_llm) || {};
-
-  // 1. LLM Settings
-  const baseUrlInput = document.getElementById('llm-base-url');
-  const modelInput = document.getElementById('llm-model');
-  const tempInput = document.getElementById('llm-temperature');
-  const tempVal = document.getElementById('temp-val');
-  const personaInput = document.getElementById('llm-persona-prompt');
-
-  const defaultBaseUrl = (defaults.llm && defaults.llm.base_url) || 'https://api.deepseek.com/v1';
-  const defaultModel = (defaults.llm && defaults.llm.model) || 'deepseek-chat';
-  const defaultTemp = (defaults.llm && defaults.llm.temperature !== undefined) ? defaults.llm.temperature : 0.7;
-
-  if (baseUrlInput) {
-    const activeUrl = (userOverrides.llm && userOverrides.llm.base_url) || (llmSettings.base_url !== defaultBaseUrl ? llmSettings.base_url : '');
-    baseUrlInput.value = activeUrl || '';
-    baseUrlInput.placeholder = `系统默认: ${defaultBaseUrl}`;
-  }
-  if (modelInput) {
-    const activeModel = (userOverrides.llm && userOverrides.llm.model) || (llmSettings.model !== defaultModel ? llmSettings.model : '');
-    modelInput.value = activeModel || '';
-    modelInput.placeholder = `系统默认: ${defaultModel}`;
-  }
-  if (tempInput) {
-    const activeTemp = (userOverrides.llm && userOverrides.llm.temperature !== undefined)
-      ? userOverrides.llm.temperature
-      : (llmSettings.temperature !== undefined ? llmSettings.temperature : defaultTemp);
-    tempInput.value = activeTemp;
-    if (tempVal) tempVal.textContent = activeTemp;
-  }
-  if (personaInput) {
-    personaInput.value = userOverrides.persona_prompt || charConfig.persona_prompt || '';
-  }
-
-  // Update LLM Provider Preset dropdown
-  const providerPreset = document.getElementById('llm-provider-preset');
-  if (providerPreset) {
-    const currentUrl = (baseUrlInput && baseUrlInput.value) || defaultBaseUrl;
-    if (currentUrl.includes('deepseek.com')) providerPreset.value = 'deepseek';
-    else if (currentUrl.includes('openrouter.ai')) providerPreset.value = 'openrouter';
-    else if (currentUrl.includes('commandcode.ai')) providerPreset.value = 'commandcode';
-    else if (currentUrl.includes('opencode.ai')) providerPreset.value = 'opencode';
-    else providerPreset.value = 'custom';
-  }
-
-  // Update LLM Key Status indicator
-  const llmKeyStatus = document.getElementById('llm-key-status');
-  if (llmKeyStatus) {
-    const isConfigured =
-      settingsData.keysStatus['deepseek'] ||
-      settingsData.keysStatus['openrouter'] ||
-      settingsData.keysStatus['commandcode'] ||
-      settingsData.keysStatus['opencode'] ||
-      settingsData.keysStatus['custom'];
-    if (isConfigured) {
-      llmKeyStatus.innerHTML = `🛡️ <span style="color:#4ade80">已在 Windows DPAPI 保险库中安全配置 (掩码: ${isConfigured.masked})</span>`;
-    } else {
-      llmKeyStatus.innerHTML = `⚠️ <span style="color:#f87171">尚未配置 API Key，请在下方输入并保存</span>`;
-    }
-  }
-
-  // 2. TTS Settings
-  const ttsCfg = charConfig.tts_config || {};
-  const ttsEngineSelect = document.getElementById('tts-engine-select');
-  const activeTtsEngine = (userOverrides.tts && userOverrides.tts.provider) || ttsCfg.tts_model || (defaults.tts && defaults.tts.provider) || 'fish_api_tts';
-  if (ttsEngineSelect) {
-    ttsEngineSelect.value = activeTtsEngine;
-    toggleTtsPanel(activeTtsEngine);
-  }
-
-  const fishCfg = ttsCfg.fish_api_tts || {};
-  const fishModel = document.getElementById('fish-model');
-  const fishRefId = document.getElementById('fish-reference-id');
-  const fishLatency = document.getElementById('fish-latency');
-  const fishBaseUrl = document.getElementById('fish-base-url');
-
-  const defFishModel = (defaults.tts && defaults.tts.model) || 's2-pro-free';
-  const defFishRef = (defaults.tts && defaults.tts.reference_id) || '7f92f8afb8ec43bf81429cc1c9199cb1';
-  const defFishLat = (defaults.tts && defaults.tts.latency) || 'balanced';
-  const defFishBase = (defaults.tts && defaults.tts.base_url) || 'https://api.fish.audio';
-
-  if (fishModel) fishModel.value = (userOverrides.tts && userOverrides.tts.model) || fishCfg.model || defFishModel;
-  if (fishRefId) {
-    const activeRef = (userOverrides.tts && userOverrides.tts.reference_id) || (fishCfg.reference_id !== defFishRef ? fishCfg.reference_id : '');
-    fishRefId.value = activeRef || '';
-    fishRefId.placeholder = `系统默认: ${defFishRef}`;
-  }
-  if (fishLatency) fishLatency.value = (userOverrides.tts && userOverrides.tts.latency) || fishCfg.latency || defFishLat;
-  if (fishBaseUrl) {
-    const activeBase = (userOverrides.tts && userOverrides.tts.base_url) || (fishCfg.base_url !== defFishBase ? fishCfg.base_url : '');
-    fishBaseUrl.value = activeBase || '';
-    fishBaseUrl.placeholder = `系统默认: ${defFishBase}`;
-  }
-
-  const edgeVoice = document.getElementById('edge-voice');
-  if (edgeVoice && userOverrides.tts && userOverrides.tts.voice) {
-    edgeVoice.value = userOverrides.tts.voice;
-  }
-
-  const fishKeyStatus = document.getElementById('fish-key-status');
-  if (fishKeyStatus) {
-    const isFishKey = settingsData.keysStatus['fish_audio'] || settingsData.keysStatus['fish.audio'];
-    if (isFishKey) {
-      fishKeyStatus.innerHTML = `🛡️ <span style="color:#4ade80">已在 DPAPI 保险库中安全加密 (${isFishKey.masked})</span>`;
-    } else {
-      fishKeyStatus.innerHTML = `⚠️ <span style="color:#f87171">尚未配置 Fish Audio 密钥</span>`;
-    }
-  }
-
-  // 3. Memory Subsystem Settings
-  const defMem = defaults.memory || {};
-  const memAuto = document.getElementById('mem-auto-generate');
-  const memInterval = document.getElementById('mem-update-interval');
-  const memMaxUserTurns = document.getElementById('mem-max-user-turns');
-  const memTargetTokens = document.getElementById('mem-target-tokens');
-  const memRetrievalEnabled = document.getElementById('mem-retrieval-enabled');
-  const memRetrievalScope = document.getElementById('mem-retrieval-scope');
-  const memRecentCount = document.getElementById('mem-recent-count');
-  const memMaxResults = document.getElementById('mem-max-results');
-  const memTokenBudget = document.getElementById('mem-token-budget');
-
-  if (memAuto) {
-    memAuto.checked = memoryOverrides.auto_generate_enabled !== undefined
-      ? memoryOverrides.auto_generate_enabled
-      : (defMem.auto_generate_enabled !== undefined ? defMem.auto_generate_enabled : true);
-  }
-  if (memInterval) {
-    memInterval.value = memoryOverrides.update_interval_turns !== undefined ? memoryOverrides.update_interval_turns : '';
-    memInterval.placeholder = `系统默认: ${defMem.update_interval_turns ?? 10}`;
-  }
-  if (memMaxUserTurns) {
-    memMaxUserTurns.value = memoryOverrides.maximum_source_user_turns !== undefined ? memoryOverrides.maximum_source_user_turns : '';
-    memMaxUserTurns.placeholder = `系统默认: ${defMem.maximum_source_user_turns ?? 10}`;
-  }
-  if (memTargetTokens) {
-    memTargetTokens.value = memoryOverrides.target_tokens !== undefined ? memoryOverrides.target_tokens : '';
-    memTargetTokens.placeholder = `系统默认: ${defMem.target_tokens ?? 0} (无上限/自适应压缩)`;
-  }
-  if (memRetrievalEnabled) {
-    memRetrievalEnabled.checked = memoryOverrides.retrieval_enabled !== undefined
-      ? memoryOverrides.retrieval_enabled
-      : (defMem.retrieval_enabled !== undefined ? defMem.retrieval_enabled : true);
-  }
-  if (memRetrievalScope) {
-    memRetrievalScope.value = memoryOverrides.retrieval_scope || defMem.retrieval_scope || 'current_conversation';
-  }
-  if (memRecentCount) {
-    memRecentCount.value = memoryOverrides.retrieval_recent_count !== undefined ? memoryOverrides.retrieval_recent_count : '';
-    memRecentCount.placeholder = `系统默认: ${defMem.retrieval_recent_count ?? 20}`;
-  }
-  if (memMaxResults) {
-    memMaxResults.value = memoryOverrides.retrieval_max_results !== undefined ? memoryOverrides.retrieval_max_results : '';
-    memMaxResults.placeholder = `系统默认: ${defMem.retrieval_max_results ?? 6}`;
-  }
-  if (memTokenBudget) {
-    memTokenBudget.value = memoryOverrides.retrieval_token_budget !== undefined ? memoryOverrides.retrieval_token_budget : '';
-    memTokenBudget.placeholder = `系统默认: ${defMem.retrieval_token_budget ?? 1200}`;
-  }
-
-  // 4. Storage Subsystem Settings
-  const storagePathInput = document.getElementById('storage-path-input');
-  const storageDefaultHint = document.getElementById('storage-default-hint');
-  const currentPath = (settingsData.storagePath && settingsData.storagePath.current_path) || cfg.user_data_dir || '';
-  const defaultPath = (settingsData.storagePath && settingsData.storagePath.default_path) || cfg.default_user_data_dir || 'E:\\我的文档\\LLM-3D-CHAT';
-  if (storagePathInput) {
-    storagePathInput.value = currentPath;
-    storagePathInput.placeholder = `当前目录: ${currentPath}`;
-  }
-  if (storageDefaultHint) {
-    storageDefaultHint.innerHTML = `系统默认路径: <code>${defaultPath}</code> (通过 Windows Shell 动态获取)`;
-  }
-
-  renderVaultCards();
-  bindFieldResetHandlers();
-}
-
-function bindFieldResetHandlers() {
-  document.querySelectorAll('.btn-field-reset').forEach((btn) => {
-    if (btn.dataset.bound === 'true') return;
-    btn.dataset.bound = 'true';
-
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      const targetId = btn.getAttribute('data-reset');
-      if (!targetId) return;
-
-      const cfg = settingsData.config || {};
-      const defaults = cfg.defaults || {};
-      const charConfig = (cfg.character_conf && cfg.character_conf.character_config) || {};
-
-      const input = document.getElementById(targetId);
-      if (!input) return;
-
-      switch (targetId) {
-        case 'llm-provider-preset':
-          input.value = 'deepseek';
-          onProviderPresetChange('deepseek');
-          break;
-        case 'llm-base-url':
-        case 'llm-model':
-          input.value = '';
-          break;
-        case 'llm-temperature':
-          input.value = (defaults.llm && defaults.llm.temperature !== undefined) ? defaults.llm.temperature : 0.7;
-          const tempVal = document.getElementById('temp-val');
-          if (tempVal) tempVal.textContent = input.value;
-          break;
-        case 'llm-persona-prompt':
-          input.value = charConfig.persona_prompt || '';
-          break;
-        case 'tts-engine-select':
-          input.value = (defaults.tts && defaults.tts.provider) || 'fish_api_tts';
-          toggleTtsPanel(input.value);
-          break;
-        case 'fish-model':
-          input.value = (defaults.tts && defaults.tts.model) || 's2-pro-free';
-          break;
-        case 'fish-latency':
-          input.value = (defaults.tts && defaults.tts.latency) || 'balanced';
-          break;
-        case 'fish-reference-id':
-        case 'fish-base-url':
-          input.value = '';
-          break;
-        case 'edge-voice':
-          input.value = 'ja-JP-NanamiNeural';
-          break;
-        case 'mem-auto-generate':
-          input.checked = true;
-          break;
-        case 'mem-update-interval':
-        case 'mem-max-user-turns':
-        case 'mem-target-tokens':
-        case 'mem-recent-count':
-        case 'mem-max-results':
-        case 'mem-token-budget':
-          input.value = '';
-          break;
-        case 'mem-retrieval-enabled':
-          input.checked = true;
-          break;
-        case 'mem-retrieval-scope':
-          input.value = 'current_conversation';
-          break;
-        case 'asr-mode':
-          input.value = 'web_speech';
-          break;
-        case 'chk-auto-interrupt':
-          input.checked = true;
-          break;
-        case 'vrm-lookat-mode':
-          input.value = 'camera';
-          break;
-        case 'vrm-breath-scale':
-          input.value = 1.0;
-          const breathVal = document.getElementById('breath-val');
-          if (breathVal) breathVal.textContent = '1.0x';
-          break;
-        case 'vrm-bg-select':
-          input.value = 'default';
-          applyBackgroundTheme('default');
-          break;
-        default:
-          input.value = '';
-          break;
-      }
-
-      // Flash feedback
-      const origText = btn.innerHTML;
-      btn.classList.add('reset-flash');
-      btn.innerHTML = '✔ 已恢复';
-      setTimeout(() => {
-        btn.classList.remove('reset-flash');
-        btn.innerHTML = origText;
-      }, 900);
-    });
   });
 }
 
-function bindStorageActions() {
-  const btnMigrate = document.getElementById('btn-save-migrate-storage');
-  if (btnMigrate && !btnMigrate.dataset.bound) {
-    btnMigrate.dataset.bound = 'true';
-    btnMigrate.addEventListener('click', async () => {
-      const pathInput = document.getElementById('storage-path-input');
-      const statusBox = document.getElementById('storage-op-status');
-      const newPath = pathInput ? pathInput.value.trim() : '';
-      if (!newPath) return;
+// --- 9. Settings Window Launchers ---
+/**
+ * 拉起独立设置窗口。
+ * @param {'settings'|'character'} page 要打开的设置页（全局 / 角色）
+ * @param {string} [tab] 可选：直接定位到某个 tab
+ * 优先让后端以 Edge/Chrome 的 --app 模式弹出（无地址栏，形似原生弹窗）；
+ * 若后端不可用（如远程访问场景），退化为普通浏览器弹出窗口。
+ */
+async function openSettingsWindow(page = 'settings', tab) {
+  const character = configSelect ? configSelect.value : '';
+  const qs = new URLSearchParams();
+  qs.set('page', page);
+  if (character) qs.set('character', character);
+  if (tab) qs.set('tab', tab);
 
-      btnMigrate.disabled = true;
-      btnMigrate.textContent = '正在迁移数据...';
-      if (statusBox) {
-        statusBox.className = 'storage-status-banner';
-        statusBox.classList.remove('hidden', 'success', 'error');
-        statusBox.textContent = `⏳ 正在迁移数据文件至 ${newPath}...`;
-      }
-
-      try {
-        const res = await fetch('/api/settings/storage-path', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ new_path: newPath, migrate: true }),
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          if (statusBox) {
-            statusBox.classList.add('success');
-            statusBox.innerHTML = `✅ ${data.message}`;
-          }
-          await loadSettingsFromServer();
-        } else {
-          if (statusBox) {
-            statusBox.classList.add('error');
-            statusBox.textContent = `❌ 迁移失败: ${data.detail || data.message || '未知错误'}`;
-          }
-        }
-      } catch (e) {
-        if (statusBox) {
-          statusBox.classList.add('error');
-          statusBox.textContent = `❌ 请求错误: ${e.message}`;
-        }
-      } finally {
-        btnMigrate.disabled = false;
-        btnMigrate.textContent = '💾 保存并迁移数据';
-      }
-    });
-  }
-
-  const btnResetStorage = document.getElementById('btn-reset-storage-path');
-  if (btnResetStorage && !btnResetStorage.dataset.bound) {
-    btnResetStorage.dataset.bound = 'true';
-    btnResetStorage.addEventListener('click', async () => {
-      const statusBox = document.getElementById('storage-op-status');
-      if (statusBox) {
-        statusBox.className = 'storage-status-banner';
-        statusBox.classList.remove('hidden', 'success', 'error');
-        statusBox.textContent = '⏳ 正在重置并迁移数据回系统默认目录...';
-      }
-
-      try {
-        const res = await fetch('/api/settings/storage-path/reset', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          if (statusBox) {
-            statusBox.classList.add('success');
-            statusBox.innerHTML = `✅ ${data.message}`;
-          }
-          await loadSettingsFromServer();
-        } else {
-          if (statusBox) {
-            statusBox.classList.add('error');
-            statusBox.textContent = `❌ 重置失败: ${data.detail || data.message || '未知错误'}`;
-          }
-        }
-      } catch (e) {
-        if (statusBox) {
-          statusBox.classList.add('error');
-          statusBox.textContent = `❌ 请求错误: ${e.message}`;
-        }
-      }
-    });
-  }
-}
-
-function onProviderPresetChange(providerId) {
-  const baseUrlInput = document.getElementById('llm-base-url');
-  const modelInput = document.getElementById('llm-model');
-
-  const presets = {
-    deepseek: { url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-    openrouter: { url: 'https://openrouter.ai/api/v1', model: 'deepseek/deepseek-chat' },
-    commandcode: { url: 'https://api.commandcode.ai/provider/v1', model: 'claude-3-5-sonnet-20241022' },
-    opencode: { url: 'https://api.opencode.ai/v1', model: 'default' },
-    custom: { url: 'https://api.your-service.com/v1', model: 'default' },
-  };
-
-  const p = presets[providerId];
-  if (p) {
-    if (baseUrlInput) {
-      baseUrlInput.value = p.url;
-      baseUrlInput.placeholder = p.url;
-    }
-    if (modelInput) {
-      modelInput.value = p.model;
-      modelInput.placeholder = p.model;
-    }
-    checkBaseUrlWarning(p.url);
-  }
-}
-
-function checkBaseUrlWarning(url) {
-  const hintEl = document.getElementById('base-url-hint');
-  if (!hintEl) return;
-  if (url && (url.includes('/chat') || url.includes('/completions'))) {
-    hintEl.style.color = '#f87171';
-    hintEl.innerHTML = '⚠️ <strong>检测到路径包含 /chat</strong>：系统保存时将自动截断至 <code>/v1</code>，以统一当前 chat 模式并兼容未来 Agent response 扩展。';
-  } else {
-    hintEl.style.color = '#fbd38d';
-    hintEl.innerHTML = '⚠️ 规范约束：端点请严格填至 <code>/v1</code> 结尾，请勿填写后面的 <code>/chat</code> 或 <code>/chat/completions</code>。当下默认 openai 兼容 chat 模式，同时预留未来 Agent response 扩展。';
-  }
-}
-
-function validateAndCleanBaseUrl(url) {
-  if (!url) return '';
-  let clean = url.trim();
-  if (clean.endsWith('/chat/completions')) {
-    clean = clean.substring(0, clean.length - '/chat/completions'.length);
-  } else if (clean.endsWith('/chat')) {
-    clean = clean.substring(0, clean.length - '/chat'.length);
-  }
-  return clean.replace(/\/+$/, '');
-}
-
-function toggleTtsPanel(engine) {
-  const fishPanel = document.getElementById('fish-audio-panel');
-  const edgePanel = document.getElementById('edge-tts-panel');
-  if (engine === 'fish_api_tts') {
-    if (fishPanel) fishPanel.classList.remove('hidden');
-    if (edgePanel) edgePanel.classList.add('hidden');
-  } else {
-    if (fishPanel) fishPanel.classList.add('hidden');
-    if (edgePanel) edgePanel.classList.remove('hidden');
-  }
-}
-
-function bindPasswordToggle(btnId, inputId) {
-  const btn = document.getElementById(btnId);
-  const input = document.getElementById(inputId);
-  if (btn && input) {
-    btn.addEventListener('click', () => {
-      input.type = input.type === 'password' ? 'text' : 'password';
-      btn.textContent = input.type === 'password' ? '👁️' : '🙈';
-    });
-  }
-}
-
-function renderVaultCards() {
-  const container = document.getElementById('vault-cards-container');
-  if (!container) return;
-  container.innerHTML = '';
-
-  const providers = [
-    { id: 'deepseek', name: '官方 DeepSeek', defaultUrl: 'https://api.deepseek.com/v1' },
-    { id: 'openrouter', name: 'OpenRouter', defaultUrl: 'https://openrouter.ai/api/v1' },
-    { id: 'commandcode', name: 'Command Code', defaultUrl: 'https://api.commandcode.ai/provider/v1' },
-    { id: 'opencode', name: 'OpenCode', defaultUrl: 'https://api.opencode.ai/v1' },
-    { id: 'fish_audio', name: 'Fish Audio (TTS)', defaultUrl: 'https://api.fish.audio' },
-    { id: 'custom', name: '自定义 Provider', defaultUrl: 'OpenAI-compatible' },
-  ];
-
-  providers.forEach((p) => {
-    const card = document.createElement('div');
-    card.className = 'vault-card';
-    const status =
-      settingsData.keysStatus[p.id] || (p.id === 'fish_audio' ? settingsData.keysStatus['fish.audio'] : null);
-    const isOk = status && status.configured;
-
-    card.innerHTML = `
-      <div class="vault-card-header">
-        <span class="vault-card-title">${p.name}</span>
-        <span class="vault-card-status ${isOk ? 'status-ok' : 'status-missing'}">
-          ${isOk ? '● 已安全加密' : '○ 未配置'}
-        </span>
-      </div>
-      <div class="vault-card-masked">
-        ${isOk ? `密钥掩码: ${status.masked}` : 'DPAPI 保险库暂无此项密钥'}
-      </div>
-      <div style="display:flex;gap:6px;margin-top:4px;">
-        <input type="password" id="vault-input-${p.id}" class="form-control" placeholder="输入新 Key..." style="padding:5px 8px;font-size:12px;">
-        <button class="btn-secondary" style="padding:4px 10px;font-size:12px;" id="btn-save-key-${p.id}">保存</button>
-      </div>
-    `;
-    container.appendChild(card);
-
-    // Bind save button
-    setTimeout(() => {
-      const btn = document.getElementById(`btn-save-key-${p.id}`);
-      const inp = document.getElementById(`vault-input-${p.id}`);
-      if (btn && inp) {
-        btn.addEventListener('click', async () => {
-          const val = inp.value.trim();
-          if (!val) return;
-          btn.textContent = '...';
-          try {
-            await fetch('/api/settings/keys', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ [p.id]: val }),
-            });
-            inp.value = '';
-            btn.textContent = '✔';
-            await loadSettingsFromServer();
-          } catch (err) {
-            btn.textContent = '✕';
-          }
-        });
-      }
-    }, 0);
-  });
-}
-
-async function saveAllSettings() {
-  const statusEl = document.getElementById('save-status-msg');
-  if (statusEl) statusEl.textContent = '正在保存配置并加密密钥...';
-
-  const charSelect = document.getElementById('setting-char-select');
-  const targetChar = charSelect ? charSelect.value : configSelect ? configSelect.value : 'zh_由比滨结衣.yaml';
-
-  const baseUrlInput = document.getElementById('llm-base-url');
-  const modelInput = document.getElementById('llm-model');
-  const tempInput = document.getElementById('llm-temperature');
-  const personaInput = document.getElementById('llm-persona-prompt');
-  const ttsEngineSelect = document.getElementById('tts-engine-select');
-
-  const cleanUrl = validateAndCleanBaseUrl(baseUrlInput ? baseUrlInput.value : '');
-  if (baseUrlInput) baseUrlInput.value = cleanUrl;
-
-  const payload = {
-    character_file: targetChar,
-    persona_prompt: personaInput ? personaInput.value : undefined,
-    llm: {
-      provider: 'openai_compatible_llm',
-      base_url: cleanUrl || undefined,
-      model: (modelInput && modelInput.value.trim()) || undefined,
-      temperature: tempInput ? parseFloat(tempInput.value) : undefined,
-    },
-    tts: {
-      provider: ttsEngineSelect ? ttsEngineSelect.value : 'fish_api_tts',
-    },
-  };
-
-  if (payload.tts.provider === 'fish_api_tts') {
-    const fishModel = document.getElementById('fish-model');
-    const fishRefId = document.getElementById('fish-reference-id');
-    const fishLatency = document.getElementById('fish-latency');
-    const fishBaseUrl = document.getElementById('fish-base-url');
-    payload.tts.model = (fishModel && fishModel.value) || 's2-pro-free';
-    payload.tts.reference_id = (fishRefId && fishRefId.value.trim()) || undefined;
-    payload.tts.latency = (fishLatency && fishLatency.value) || 'balanced';
-    payload.tts.base_url = (fishBaseUrl && fishBaseUrl.value.trim()) || 'https://api.fish.audio';
-  } else if (payload.tts.provider === 'edge_tts') {
-    const edgeVoice = document.getElementById('edge-voice');
-    payload.tts.voice = edgeVoice ? edgeVoice.value : undefined;
-  }
-
-  // Memory settings payload
-  const memAuto = document.getElementById('mem-auto-generate');
-  const memInterval = document.getElementById('mem-update-interval');
-  const memMaxUserTurns = document.getElementById('mem-max-user-turns');
-  const memTargetTokens = document.getElementById('mem-target-tokens');
-  const memRetrievalEnabled = document.getElementById('mem-retrieval-enabled');
-  const memRetrievalScope = document.getElementById('mem-retrieval-scope');
-  const memRecentCount = document.getElementById('mem-recent-count');
-  const memMaxResults = document.getElementById('mem-max-results');
-  const memTokenBudget = document.getElementById('mem-token-budget');
-
-  payload.memory = {
-    auto_generate_enabled: memAuto ? memAuto.checked : true,
-    update_interval_turns: memInterval && memInterval.value.trim() ? parseInt(memInterval.value.trim(), 10) : '',
-    maximum_source_user_turns: memMaxUserTurns && memMaxUserTurns.value.trim() ? parseInt(memMaxUserTurns.value.trim(), 10) : '',
-    target_tokens: memTargetTokens && memTargetTokens.value.trim() ? parseInt(memTargetTokens.value.trim(), 10) : '',
-    retrieval_enabled: memRetrievalEnabled ? memRetrievalEnabled.checked : true,
-    retrieval_scope: memRetrievalScope ? memRetrievalScope.value : 'current_conversation',
-    retrieval_recent_count: memRecentCount && memRecentCount.value.trim() ? parseInt(memRecentCount.value.trim(), 10) : '',
-    retrieval_max_results: memMaxResults && memMaxResults.value.trim() ? parseInt(memMaxResults.value.trim(), 10) : '',
-    retrieval_token_budget: memTokenBudget && memTokenBudget.value.trim() ? parseInt(memTokenBudget.value.trim(), 10) : '',
-  };
-
-  // 1. Save Keys if filled
-  const keysToSave = {};
-  const llmKeyInput = document.getElementById('llm-api-key');
-  const providerPreset = document.getElementById('llm-provider-preset');
-  const selectedProviderId = (providerPreset && providerPreset.value) || 'deepseek';
-  if (llmKeyInput && llmKeyInput.value.trim()) {
-    keysToSave[selectedProviderId] = llmKeyInput.value.trim();
-  }
-  const fishKeyInput = document.getElementById('fish-api-key');
-  if (fishKeyInput && fishKeyInput.value.trim()) {
-    keysToSave['fish_audio'] = fishKeyInput.value.trim();
-  }
-
-  if (Object.keys(keysToSave).length > 0) {
-    try {
-      await fetch('/api/settings/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(keysToSave),
-      });
-      if (llmKeyInput) llmKeyInput.value = '';
-      if (fishKeyInput) fishKeyInput.value = '';
-    } catch (e) {
-      console.warn('Failed to save keys:', e);
-    }
-  }
-
-  // 2. Save Config Overrides
   try {
-    const res = await fetch('/api/settings/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      if (statusEl) {
-        statusEl.innerHTML = '✅ 设置已增量保存至资料库，密钥由 Windows DPAPI 加密！';
-      }
-      setTimeout(() => {
-        closeSettingsModal();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'switch-config', file: targetChar }));
-        }
-      }, 1200);
-    } else {
-      const err = await res.json();
-      if (statusEl) statusEl.textContent = `❌ 保存失败: ${err.detail || '未知错误'}`;
+    const res = await fetch(`/api/settings/open-window?${qs.toString()}`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
     }
+    return;
   } catch (e) {
-    if (statusEl) statusEl.textContent = `❌ 保存失败: ${e.message}`;
+    console.warn('后端拉起设置窗口失败，退化为浏览器弹窗:', e.message);
   }
+  const file = page === 'character' ? './character.html' : './settings.html';
+  window.open(`${file}?${qs.toString()}`, 'vtuber-settings', 'width=1020,height=780');
 }
 
 function applyBackgroundTheme(themeKey) {
@@ -1874,9 +1502,17 @@ function animate() {
   const elapsedTime = clock.getElapsedTime();
 
   if (currentVrm) {
+    // 1. 驱动 VRMA 骨骼动作与待机循环
+    if (currentAnimationMixer) {
+      currentAnimationMixer.update(delta);
+    }
+    // 2. 语音口型 Viseme 分析
     updateLipSync();
+    // 3. 自然眨眼
     updateBlink(delta);
+    // 4. 程序化待机补正 (当无 VRMA 动作时保底)
     updateIdle(elapsedTime);
+    // 5. 更新物理飘带、LookAt 与表情管理器
     currentVrm.update(delta);
   }
 
@@ -1887,16 +1523,15 @@ function animate() {
 window.addEventListener('DOMContentLoaded', () => {
   initScene();
   bindEvents();
+  preloadAllVrmaMotions();
   applyCharacterUI('由比滨结衣');
   initWebSocket();
   animate();
 
+  // ?settings=xxx 直接拉起独立设置窗口（定位到对应 tab）
   const settingsParam = new URLSearchParams(window.location.search).get('settings');
   if (settingsParam) {
-    openSettingsModal().then(() => {
-      const tab = document.querySelector(`[data-tab="tab-${settingsParam}"]`);
-      if (tab) tab.click();
-    });
+    openSettingsWindow('settings', settingsParam);
   }
 });
 

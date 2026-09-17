@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>角色设置 - Open-LLM-VTuber</title>
+  <link rel="stylesheet" href="./style.css">
+  <style>
+    html, body.settings-page {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #14131f;
+    }
+    body.settings-page .settings-modal {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      opacity: 1;
+      visibility: visible;
+    }
+    body.settings-page .settings-backdrop { display: none; }
+    body.settings-page .settings-container {
+      width: 100%;
+      max-width: none;
+      height: 100%;
+      max-height: none;
+      border-radius: 0;
+      border: none;
+      box-shadow: none;
+    }
+    .page-scope-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      margin-left: 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      background: rgba(244, 114, 182, 0.16);
+      color: #f9a8d4;
+      border: 1px solid rgba(244, 114, 182, 0.35);
+    }
+    /* 角色页无需左侧 tab 栏，内容直接铺满 */
+    body.settings-page .settings-body { grid-template-columns: 1fr; }
+    body.settings-page .settings-tabs { display: none; }
+    .char-hero {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .char-hero-avatar {
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      background: linear-gradient(135deg, #f472b6, #a78bfa);
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .char-hero-meta { flex: 1; min-width: 0; }
+    .char-hero-title { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+    .char-hero-sub { font-size: 12px; color: #9a97b8; }
+  </style>
+</head>
+<body class="settings-page" data-settings-page="character">
+  <div id="settings-modal" class="settings-modal">
+    <div class="settings-container">
+      <div class="settings-header">
+        <div class="settings-title-group">
+          <span class="settings-icon">👤</span>
+          <h2>角色设置</h2>
+          <span class="page-scope-badge">仅对当前角色生效</span>
+        </div>
+        <div class="settings-header-right">
+          <span class="vault-badge" title="API Key 均受 Windows DPAPI 操作系统级保护">
+            <span class="vault-icon">🛡️</span> DPAPI 安全加密
+          </span>
+          <button id="btn-close-settings" class="btn-close" title="关闭窗口">✕</button>
+        </div>
+      </div>
+
+      <div class="settings-body">
+        <div class="settings-tab-content">
+          <section class="tab-pane active">
+            <div class="char-hero">
+              <div class="char-hero-avatar" id="char-hero-avatar">角</div>
+              <div class="char-hero-meta">
+                <div class="char-hero-title" id="char-hero-title">加载中...</div>
+                <div class="char-hero-sub" id="char-hero-sub">人设与声音按角色独立保存；LLM 与密钥为全局共用。</div>
+              </div>
+              <select id="setting-char-select" class="form-control" style="max-width: 230px;">
+                <!-- dynamically populated -->
+              </select>
+            </div>
+
+            <div class="section-desc">
+              这里配置<strong>只属于该角色</strong>的内容：人设提示词、语音音色、3D 形象表现。
+              API 端点与密钥在「全局设置」窗口维护，对全部角色共用。
+            </div>
+
+            <div class="form-grid">
+              <!-- 人设 -->
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label class="section-subtitle">📝 角色人设 (System Prompt)</label>
+                </div>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>人设提示词</label>
+                  <button type="button" class="btn-field-reset" data-reset="llm-persona-prompt" title="恢复角色预置人设">↺ 恢复默认</button>
+                </div>
+                <textarea id="llm-persona-prompt" class="form-control prompt-textarea" rows="12" placeholder="输入角色的性格、语言风格、称谓与台词规范..."></textarea>
+                <span class="form-hint">决定该角色「是谁、怎么说话」。留空则使用角色 yaml 中的预置人设。</span>
+              </div>
+
+              <!-- 音色（引擎与合成参数已移至全局设置，这里只绑音色） -->
+              <div class="form-group full-width" style="margin-top: 10px;">
+                <div class="form-label-row">
+                  <label class="section-subtitle">🎙️ 音色绑定 (Voice)</label>
+                </div>
+              </div>
+
+              <div id="fish-audio-panel" class="form-subgrid full-width">
+                <div class="form-group full-width">
+                  <div class="form-label-row">
+                    <label>Fish Audio 声音参考 ID (Reference ID)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-reference-id" title="恢复默认音色 ID">↺ 恢复默认</button>
+                  </div>
+                  <input type="text" id="fish-reference-id" class="form-control" placeholder="默认音色: 7f92f8afb8ec43bf81429cc1c9199cb1">
+                  <span class="form-hint">在 fish.audio 官网选取音色，复制其 Reference ID 填入。<strong>此项按角色分别保存</strong>——这是让每个角色拥有不同声音的关键。</span>
+                </div>
+              </div>
+
+              <div id="edge-tts-panel" class="form-subgrid full-width">
+                <div class="form-group full-width">
+                  <div class="form-label-row">
+                    <label>Edge TTS 发音人 (Voice)</label>
+                    <button type="button" class="btn-field-reset" data-reset="edge-voice" title="恢复默认发音人">↺ 恢复默认</button>
+                  </div>
+                  <select id="edge-voice" class="form-control">
+                    <option value="ja-JP-NanamiNeural">七海 (ja-JP-NanamiNeural - 日语女声)</option>
+                    <option value="zh-CN-XiaoxiaoNeural">晓晓 (zh-CN-XiaoxiaoNeural - 中文温柔女声)</option>
+                    <option value="zh-CN-YunxiNeural">云希 (zh-CN-YunxiNeural - 中文自然男声)</option>
+                    <option value="en-US-JennyNeural">Jenny (en-US-JennyNeural - 英语自然女声)</option>
+                  </select>
+                  <span class="form-hint">同样<strong>按角色保存</strong>。</span>
+                </div>
+              </div>
+
+              <div class="form-group full-width">
+                <span class="form-hint">🌐 语音<strong>引擎</strong>与<strong>合成参数</strong>（模型 / 输出格式 / 情感表现力 / 语速 / 密钥等）为全局共用，请到「全局设置 → 语音合成 (TTS)」调整；此处只需为这个角色挑选音色。</span>
+              </div>
+
+              <!-- 3D 形象 -->
+              <div class="form-group full-width" style="margin-top: 10px;">
+                <div class="form-label-row">
+                  <label class="section-subtitle">👗 3D 形象与表现</label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>视线追踪 (Look-At)</label>
+                  <button type="button" class="btn-field-reset" data-reset="vrm-lookat-mode" title="恢复默认正面视线">↺ 恢复默认</button>
+                </div>
+                <select id="vrm-lookat-mode" class="form-control">
+                  <option value="camera">聚焦摄像机 (自然正面视线)</option>
+                  <option value="mouse">跟随鼠标指针</option>
+                  <option value="none">固定不追踪</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>待机呼吸晃动幅度 (<span id="breath-val">1.0x</span>)</label>
+                  <button type="button" class="btn-field-reset" data-reset="vrm-breath-scale" title="恢复默认幅度 1.0x">↺ 恢复默认</button>
+                </div>
+                <input type="range" id="vrm-breath-scale" min="0" max="2" step="0.1" value="1.0" class="form-range">
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>背景场景</label>
+                  <button type="button" class="btn-field-reset" data-reset="vrm-bg-select" title="恢复默认星夜背景">↺ 恢复默认</button>
+                </div>
+                <select id="vrm-bg-select" class="form-control">
+                  <option value="default">深邃星夜 (深色沉浸式默认背景)</option>
+                  <option value="ceiling-window">天窗夜景 (Ceiling Window)</option>
+                  <option value="cityscape">赛博都市 (Cityscape)</option>
+                  <option value="computer-room">电脑房 (Computer Room)</option>
+                  <option value="moon-mountain">月照群山 (Moon Mountain)</option>
+                </select>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div class="settings-footer">
+        <div class="footer-status" id="save-status-msg"></div>
+        <div class="footer-buttons">
+          <button id="btn-open-global" class="btn-secondary">🌐 打开全局设置</button>
+          <button id="btn-cancel-settings" class="btn-secondary">关闭</button>
+          <button id="btn-save-settings" class="btn-primary">
+            <span>💾 保存并应用</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./settings.js"></script>
+</body>
+</html>

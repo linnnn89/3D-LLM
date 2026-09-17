@@ -41,6 +41,24 @@ ENGLISH README | [中文 README](./README.CN.md) | [한국어 README](./README.K
 
 
 
+## 🧩 Local Modifications (this fork)
+
+> 这里记录本 fork 相对上游的本地定制，方便回溯。"上游"指 [Open-LLM-VTuber](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber)。
+
+| 模块 | 位置 | 说明 |
+| --- | --- | --- |
+| **3D VRM 数字人视口** | `vrm_frontend/` | 完整的 three.js + three-vrm 前端，经服务 `/vrm` 路径挂载，含表情、口型、眨眼、注视、点击互动 |
+| **肢体动作系统** | `vrm_frontend/app.js` + `motions/` | 双引擎：外部 `.vrma` 动捕优先，缺失时自动降级为程序化骨骼关键帧 |
+| **本地桌面套壳启动器** | `app/` | 自动拉起后端 + Edge/Chrome App 视口独立窗口，关窗口即停服。详见 [app/README.md](./app/README.md) |
+| **3D 角色** | `vrm-models/`、`characters/` | 喜多郁代 (Kira)、由比滨结衣、雷电将军、依蕾娜；爱蜜莉雅因缺模型已归档 |
+| **渲染修正** | `vrm_frontend/app.js` | 移除 `ACESFilmicToneMapping`、光照总量 4.4 → 2.4（MToon 卡通渲染下前者会把浅色贴图洗成白模） |
+| **静态资源缓存** | `src/open_llm_vtuber/server.py` | 对 `.js/.mjs/.html/.css` 下发 `Cache-Control: no-cache`，前端改动刷新即生效 |
+| **模型减面工具** | `scripts/optimize_vrm.py` | 用 gltfpack 简化网格，并把被丢弃的 VRM 扩展按骨骼索引偏移搬回，无需 Blender 即可把高模压到可实时渲染的面数 |
+
+各模块的架构、参数、注意事项与排错方法，分别见对应目录下的 `README.md`。
+
+
+
 ## ⭐️ What is this project?
 
 
@@ -100,6 +118,18 @@ The reason it's called `Open-LLM-Vtuber` instead of `Open-LLM-Companion` or `Ope
 ## 🚀 Quick Start
 
 Please refer to the [Quick Start](https://open-llm-vtuber.github.io/docs/quick-start) section in our documentation for installation.
+
+
+
+## 🖥 Local Desktop Launcher
+
+`app/启动器.exe` (shortcut: `启动Open-LLM-VTuber.lnk`) is a **thin wrapper, not a packaged application**. It starts `run_server.py`, waits until it is ready, then opens `http://localhost:12393/vrm/` in an Edge/Chrome **app window** (no address bar, no tabs). Closing that window shuts the backend down and releases the port.
+
+Because the wrapper simply points at the running server, and `/vrm` is mounted directly onto the `vrm_frontend/` directory, **every front-end edit takes effect on refresh** — no rebuild or repackaging required.
+
+> Heads-up: if port `12393` is already listening, the launcher **connects to that existing process instead of restarting it**, so changes made to the Python backend (`src/`) will not apply until you kill and restart it.
+
+See **[app/README.md](./app/README.md)** for the full architecture, startup chain, CLI flags and troubleshooting table.
 
 
 

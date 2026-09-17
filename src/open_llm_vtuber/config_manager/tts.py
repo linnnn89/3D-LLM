@@ -315,7 +315,15 @@ class FishAPITTSConfig(I18nMixin):
     reference_id: str = Field("7f92f8afb8ec43bf81429cc1c9199cb1", alias="reference_id")
     latency: Literal["normal", "balanced"] = Field("balanced", alias="latency")
     base_url: str = Field("https://api.fish.audio", alias="base_url")
-    model: str = Field("s2-pro-free", alias="model")
+    model: str = Field("s2.1-pro-free", alias="model")
+    # 输出音频格式。必须与落盘扩展名一致——SDK 默认是 mp3，
+    # 若与 file_extension 不符会产出"内容 mp3、扩展名 wav"的坏文件。
+    format: Literal["wav", "pcm", "mp3"] = Field("wav", alias="format")
+    # 情感表现力控制（Fish 官方 TTSRequest 参数）
+    temperature: float = Field(0.7, alias="temperature")
+    top_p: float = Field(0.7, alias="top_p")
+    # 语速（prosody.speed）
+    speed: float = Field(1.0, alias="speed")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "api_key": Description(
@@ -333,9 +341,21 @@ class FishAPITTSConfig(I18nMixin):
             en="Base URL for Fish TTS API", zh="Fish TTS API 的基础 URL"
         ),
         "model": Description(
-            en="Fish Audio model name (default: s2-pro-free)",
-            zh="Fish Audio 模型名称（默认：s2-pro-free）",
+            en="Fish Audio model name (default: s2.1-pro-free)",
+            zh="Fish Audio 模型名称（默认：s2.1-pro-free）",
         ),
+        "format": Description(
+            en="Output audio format; must match the cache file extension",
+            zh="输出音频格式；需与缓存文件扩展名一致",
+        ),
+        "temperature": Description(
+            en="Expressiveness (0-1). Higher = more varied",
+            zh="情感表现力（0-1），越高越丰富多变",
+        ),
+        "top_p": Description(
+            en="Nucleus sampling threshold (0-1)", zh="核采样阈值（0-1）"
+        ),
+        "speed": Description(en="Speech speed multiplier", zh="语速倍率"),
     }
 
 

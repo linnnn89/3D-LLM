@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>全局设置 - Open-LLM-VTuber</title>
+  <link rel="stylesheet" href="./style.css">
+  <style>
+    /* 独立窗口适配：复用同一套 .settings-* 样式，但铺满整个窗口 */
+    html, body.settings-page {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #14131f;
+    }
+    body.settings-page .settings-modal {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      opacity: 1;
+      visibility: visible;
+    }
+    body.settings-page .settings-backdrop { display: none; }
+    body.settings-page .settings-container {
+      width: 100%;
+      max-width: none;
+      height: 100%;
+      max-height: none;
+      border-radius: 0;
+      border: none;
+      box-shadow: none;
+    }
+    .page-scope-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      margin-left: 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      background: rgba(96, 165, 250, 0.16);
+      color: #93c5fd;
+      border: 1px solid rgba(96, 165, 250, 0.35);
+    }
+  </style>
+</head>
+<body class="settings-page" data-settings-page="global">
+  <div id="settings-modal" class="settings-modal">
+    <div class="settings-container">
+      <div class="settings-header">
+        <div class="settings-title-group">
+          <span class="settings-icon">🌐</span>
+          <h2>全局设置</h2>
+          <span class="page-scope-badge">对所有角色生效</span>
+        </div>
+        <div class="settings-header-right">
+          <span class="vault-badge" title="API Key 均受 Windows DPAPI 操作系统级保护">
+            <span class="vault-icon">🛡️</span> DPAPI 安全加密
+          </span>
+          <button id="btn-close-settings" class="btn-close" title="关闭窗口">✕</button>
+        </div>
+      </div>
+
+      <div class="settings-body">
+        <!-- Tab Navigation Sidebar -->
+        <nav class="settings-tabs">
+          <button class="tab-btn" data-tab="tab-llm">
+            <span class="tab-icon">🤖</span>
+            <span class="tab-label">LLM 大模型</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-tts">
+            <span class="tab-icon">🎙️</span>
+            <span class="tab-label">语音合成 (TTS)</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-memory">
+            <span class="tab-icon">🧠</span>
+            <span class="tab-label">长期记忆 (Memory)</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-storage">
+            <span class="tab-icon">📁</span>
+            <span class="tab-label">数据存储 (Storage)</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-asr">
+            <span class="tab-icon">🎧</span>
+            <span class="tab-label">语音交互 (ASR)</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-vault">
+            <span class="tab-icon">🔐</span>
+            <span class="tab-label">密钥保险库</span>
+          </button>
+        </nav>
+
+        <!-- Tab Contents -->
+        <div class="settings-tab-content">
+          <!-- 1. LLM Tab（全局） -->
+          <section id="tab-llm" class="tab-pane active">
+            <div class="section-desc">
+              这里的 LLM 端点与密钥是<strong>全局共用</strong>的：所有角色共享同一套大模型连接，切换角色不会改变它。
+              角色专属的人设与声音请到「角色设置」窗口配置。
+            </div>
+
+            <!-- 全局设置存档：3 个槽位，整份全局通用配置的快照 -->
+            <div class="profile-strip">
+              <div class="profile-strip-head">
+                <span class="profile-strip-title">🗂 全局设置存档</span>
+                <small>3 个槽位，每个存一整份全局通用配置（LLM + 长期记忆）。不含密钥与存储路径。</small>
+              </div>
+              <div class="profile-grid" id="profile-grid">
+                <!-- 3 张卡片由 settings.js 渲染 -->
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>预置模型提供商 (Provider)</label>
+                  <button type="button" class="btn-field-reset" data-reset="llm-provider-preset" title="恢复默认提供商">↺ 恢复默认</button>
+                </div>
+                <select id="llm-provider-preset" class="form-control">
+                  <option value="deepseek">官方 DeepSeek (https://api.deepseek.com/v1)</option>
+                  <option value="openrouter">OpenRouter (https://openrouter.ai/api/v1)</option>
+                  <option value="commandcode">Command Code (https://api.commandcode.ai/provider/v1)</option>
+                  <option value="opencode">OpenCode (https://api.opencode.ai/v1)</option>
+                  <option value="custom">自定义 OpenAI 兼容 Provider</option>
+                </select>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>Base URL (API 端点根地址) <span class="required">*仅填至 /v1</span></label>
+                  <button type="button" class="btn-field-reset" data-reset="llm-base-url" title="恢复默认端点">↺ 恢复默认</button>
+                </div>
+                <div class="input-with-tip">
+                  <input type="text" id="llm-base-url" class="form-control" placeholder="例如: https://api.deepseek.com/v1">
+                </div>
+                <span class="form-hint warning-hint" id="base-url-hint">⚠️ 规范约束：端点请严格填至 <code>/v1</code> 结尾，请勿填写后面的 <code>/chat</code> 或 <code>/chat/completions</code>。当下默认 openai 兼容 chat 模式，同时预留未来 Agent response 扩展。</span>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>模型名称 (Model Name)</label>
+                  <button type="button" class="btn-field-reset" data-reset="llm-model" title="恢复默认模型">↺ 恢复默认</button>
+                </div>
+                <input type="text" id="llm-model" class="form-control" placeholder="系统默认: deepseek-chat">
+                <span class="form-hint">留空则自动继承系统默认模型 (不硬写档案)</span>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>采样温度 (Temperature: <span id="temp-val">0.7</span>)</label>
+                  <button type="button" class="btn-field-reset" data-reset="llm-temperature" title="恢复默认温度 0.7">↺ 恢复默认</button>
+                </div>
+                <input type="range" id="llm-temperature" min="0" max="2" step="0.05" value="0.7" class="form-range">
+                <span class="form-hint">越低越严谨稳定，越高越生动多变</span>
+              </div>
+
+              <div class="form-group full-width">
+                <label>Provider API Key (通过 Windows DPAPI 硬件级加密存储)</label>
+                <div class="input-password-group">
+                  <input type="password" id="llm-api-key" class="form-control" placeholder="留空则保持现有密钥，输入新 Key 则自动加密更新">
+                  <button type="button" class="btn-toggle-eye" id="btn-toggle-llm-key">👁️</button>
+                </div>
+                <span class="form-hint" id="llm-key-status">🔒 密钥状态检测中...</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 2. TTS Tab（全局） -->
+          <section id="tab-tts" class="tab-pane">
+            <div class="section-desc">
+              语音<strong>引擎与全部合成参数全局共用</strong>：所有角色走同一套设置，切换角色不会改变它。
+              每个角色各自绑定的<strong>音色</strong>（Fish 参考 ID / Edge 发音人）请到「角色设置」窗口配置。
+            </div>
+
+            <div class="form-grid">
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>语音服务引擎 (Provider)</label>
+                  <button type="button" class="btn-field-reset" data-reset="tts-engine-select" title="恢复默认引擎">↺ 恢复默认</button>
+                </div>
+                <select id="tts-engine-select" class="form-control">
+                  <option value="fish_api_tts">Fish Audio (官方云端 API，高质量克隆与多语言情感)</option>
+                  <option value="edge_tts">Edge TTS (微软免费内置语音)</option>
+                </select>
+              </div>
+
+              <!-- Fish Audio 全局参数 -->
+              <div id="fish-audio-panel" class="form-subgrid full-width">
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <label>官方模型 (Model)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-model" title="恢复默认模型">↺ 恢复默认</button>
+                  </div>
+                  <select id="fish-model" class="form-control">
+                    <option value="s2.1-pro-free">s2.1-pro-free (官方免费开发层，推荐开发调试)</option>
+                    <option value="s2.1-pro">s2.1-pro (官方推荐生产模型，音质/延迟/吞吐最佳)</option>
+                    <option value="s2-pro">s2-pro (上一代生产模型，仍可用)</option>
+                    <option value="s1">s1 (初代模型，仅兼容旧音色)</option>
+                    <option value="drama-3-preview">drama-3-preview (预览模型，行为可能变动)</option>
+                  </select>
+                  <span class="form-hint">填错模型名不会报错，Fish 会<strong>静默改用付费的 s2.1-pro</strong>，随后可能因额度不足返回 402。</span>
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <label>延迟模式 (Latency)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-latency" title="恢复默认延迟模式">↺ 恢复默认</button>
+                  </div>
+                  <select id="fish-latency" class="form-control">
+                    <option value="balanced">balanced (官方推荐：均衡低延迟，极速首字发音)</option>
+                    <option value="normal">normal (标准模式：全精度计算，音质极致)</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <label>输出格式 (Format)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-format" title="恢复默认格式">↺ 恢复默认</button>
+                  </div>
+                  <select id="fish-format" class="form-control">
+                    <option value="wav">wav (无损，音质最好，体积较大)</option>
+                    <option value="mp3">mp3 (有损压缩，体积小)</option>
+                    <option value="pcm">pcm (原始采样)</option>
+                  </select>
+                  <span class="form-hint">需与缓存文件扩展名一致；更换格式后请清理 <code>cache/</code> 里的旧音频。</span>
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <label>情感表现力 (Temperature: <span id="fish-temp-val">0.7</span>)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-temperature" title="恢复默认">↺ 恢复默认</button>
+                  </div>
+                  <input type="range" id="fish-temperature" class="form-control" min="0" max="1" step="0.05" value="0.7">
+                  <span class="form-hint">越高越丰富多变，越低越稳定一致（官方默认 0.7）。</span>
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <label>核采样 (Top P: <span id="fish-topp-val">0.7</span>)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-top-p" title="恢复默认">↺ 恢复默认</button>
+                  </div>
+                  <input type="range" id="fish-top-p" class="form-control" min="0" max="1" step="0.05" value="0.7">
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <label>语速 (Speed: <span id="fish-speed-val">1.0</span>x)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-speed" title="恢复默认">↺ 恢复默认</button>
+                  </div>
+                  <input type="range" id="fish-speed" class="form-control" min="0.5" max="2" step="0.05" value="1.0">
+                </div>
+
+                <div class="form-group full-width">
+                  <div class="form-label-row">
+                    <label>默认音色 (Reference ID)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-reference-id" title="恢复默认音色 ID">↺ 恢复默认</button>
+                  </div>
+                  <input type="text" id="fish-reference-id" class="form-control" placeholder="默认音色: 7f92f8afb8ec43bf81429cc1c9199cb1">
+                  <span class="form-hint">这是<strong>未单独绑定音色的角色</strong>所使用的兜底音色。单个角色的专属音色请到「角色设置」里配置。</span>
+                </div>
+
+                <div class="form-group full-width">
+                  <div class="form-label-row">
+                    <label>API 基础地址 (Base URL)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-base-url" title="恢复默认地址">↺ 恢复默认</button>
+                  </div>
+                  <input type="text" id="fish-base-url" class="form-control" value="https://api.fish.audio" placeholder="https://api.fish.audio">
+                  <span class="form-hint">SDK 会自行拼接 <code>/v1/tts</code>，此处<strong>不要</strong>带路径。</span>
+                </div>
+
+                <div class="form-group full-width">
+                  <label>Fish Audio API Key（全局共用，已由 DPAPI 加密）</label>
+                  <div class="input-password-group">
+                    <input type="password" id="fish-api-key" class="form-control" placeholder="留空则保持保险库现有密钥">
+                    <button type="button" class="btn-toggle-eye" id="btn-toggle-fish-key">👁️</button>
+                  </div>
+                  <span class="form-hint" id="fish-key-status">🔒 Fish Audio 密钥状态...</span>
+                </div>
+              </div>
+
+              <!-- Edge TTS 面板 -->
+              <div id="edge-tts-panel" class="form-subgrid full-width hidden">
+                <div class="form-group full-width">
+                  <span class="form-hint">Edge TTS 无需全局参数；每个角色的发音人（Voice）在「角色设置」中单独绑定。</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 3. Memory Tab -->
+          <section id="tab-memory" class="tab-pane">
+            <div class="section-desc">
+              配置长期记忆自主学习与历史对话检索系统。<strong>全局生效</strong>，数据实时保存在用户资料目录中的 SQLite 数据库中。输入框实时引用默认值，未修改项不硬写用户档案。
+            </div>
+            <div class="form-grid">
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label class="section-subtitle">🤖 记忆生成策略 (Memory Generation)</label>
+                </div>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="mem-auto-generate" checked>
+                    <span>启用对话记忆自动沉淀 (在后台静默提炼长期记忆与人物认知画像)</span>
+                  </label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-auto-generate" title="恢复默认开关">↺ 恢复默认</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>记忆触发轮数 (Update Interval)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-update-interval" title="恢复默认轮数 10">↺ 恢复默认</button>
+                </div>
+                <input type="number" id="mem-update-interval" class="form-control" placeholder="系统默认: 10" min="2" max="50">
+                <span class="form-hint">每经历指定用户对话轮数后，后台自动触发一次增量记忆更新 (默认: 10)</span>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>最大追溯用户轮数 (Max Source Turns)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-max-user-turns" title="恢复默认轮数 10">↺ 恢复默认</button>
+                </div>
+                <input type="number" id="mem-max-user-turns" class="form-control" placeholder="系统默认: 10" min="2" max="50">
+                <span class="form-hint">每次提炼记忆时向前参考的最大用户发言数 (默认: 10)</span>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>记忆目标 Token 预算 (Target Tokens)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-target-tokens" title="恢复默认 0">↺ 恢复默认</button>
+                </div>
+                <input type="number" id="mem-target-tokens" class="form-control" placeholder="系统默认: 0 (无上限/自适应压缩)" min="0" step="100">
+                <span class="form-hint">长期记忆主体的总 Token 上限，设为 0 代表自适应不强行压缩 (默认: 0)</span>
+              </div>
+
+              <div class="form-group full-width" style="margin-top: 10px;">
+                <div class="form-label-row">
+                  <label class="section-subtitle">🔍 历史检索与召回 (History Retrieval / FTS5)</label>
+                </div>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="mem-retrieval-enabled" checked>
+                    <span>启用对话历史全文检索 (基于 SQLite FTS5 BM25 高速匹配过往细节)</span>
+                  </label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-retrieval-enabled" title="恢复默认开关">↺ 恢复默认</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>检索范围 (Retrieval Scope)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-retrieval-scope" title="恢复默认当前会话">↺ 恢复默认</button>
+                </div>
+                <select id="mem-retrieval-scope" class="form-control">
+                  <option value="current_conversation">当前会话 (current_conversation - 聚焦当前话题)</option>
+                  <option value="same_character">同角色全局 (same_character - 跨所有历史会话)</option>
+                </select>
+                <span class="form-hint">检索是限定在当前会话还是全局跨会话 (默认: 当前会话)</span>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>最近消息保护轮数 (Recent Count)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-recent-count" title="恢复默认 20">↺ 恢复默认</button>
+                </div>
+                <input type="number" id="mem-recent-count" class="form-control" placeholder="系统默认: 20" min="5" max="100">
+                <span class="form-hint">保留最近 N 条完整对话不被检索折叠 (默认: 20)</span>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>最大召回片段数 (Max Results)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-max-results" title="恢复默认 6">↺ 恢复默认</button>
+                </div>
+                <input type="number" id="mem-max-results" class="form-control" placeholder="系统默认: 6" min="1" max="20">
+                <span class="form-hint">FTS5 全文索引单次召回并注入上下文的最大历史片段数 (默认: 6)</span>
+              </div>
+
+              <div class="form-group">
+                <div class="form-label-row">
+                  <label>检索注入 Token 预算 (Token Budget)</label>
+                  <button type="button" class="btn-field-reset" data-reset="mem-token-budget" title="恢复默认 1200">↺ 恢复默认</button>
+                </div>
+                <input type="number" id="mem-token-budget" class="form-control" placeholder="系统默认: 1200" min="200" max="4000" step="100">
+                <span class="form-hint">分配给历史召回片段的最大 Token 上限 (默认: 1200)</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 3. Storage Tab -->
+          <section id="tab-storage" class="tab-pane">
+            <div class="section-desc">
+              管理用户资料、加密密钥与长期记忆数据的物理存储位置。本软件支持动态解析 Windows 11 “我的文档”原生路径，允许灵活改写、数据一键平滑迁移与随时恢复默认值。
+            </div>
+            <div class="form-grid">
+              <div class="form-group full-width">
+                <div class="storage-info-box">
+                  <div class="storage-info-title">📁 集中化用户数据保存说明</div>
+                  <div class="storage-info-desc">
+                    本软件将所有敏感与个性化资料集中统一保存在该目录下，不污染代码根目录，换机或更新平滑无忧：
+                  </div>
+                  <ul class="storage-file-list">
+                    <li>🔐 <code>keys.enc</code>：微软 DPAPI 硬件加密的 API Key 保险库</li>
+                    <li>⚙️ <code>user_settings.json</code>：增量保存的用户配置（仅记录与系统默认不一致的改动项）</li>
+                    <li>🧠 <code>memory.sqlite</code>：长期记忆本体、历史对话记录与 FTS5 全文检索索引库</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>用户资料保存目录 (User Data Directory)</label>
+                  <button type="button" class="btn-field-reset" id="btn-reset-storage-path" title="恢复系统默认路径">↺ 恢复默认路径</button>
+                </div>
+                <div class="input-with-action">
+                  <input type="text" id="storage-path-input" class="form-control" placeholder="正在读取存储路径...">
+                  <button type="button" id="btn-save-migrate-storage" class="btn-primary-sm">💾 保存并迁移数据</button>
+                </div>
+                <span class="form-hint" id="storage-default-hint">默认系统路径: <code>E:\我的文档\LLM-3D-CHAT</code> (通过 Windows Shell 动态获取)</span>
+              </div>
+
+              <div class="form-group full-width">
+                <div id="storage-op-status" class="storage-status-banner hidden"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 4. ASR Tab -->
+          <section id="tab-asr" class="tab-pane">
+            <div class="section-desc">配置语音识别输入与交互行为（全局生效）。</div>
+            <div class="form-grid">
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label>输入交互方式</label>
+                  <button type="button" class="btn-field-reset" data-reset="asr-mode" title="恢复默认识别方式">↺ 恢复默认</button>
+                </div>
+                <select id="asr-mode" class="form-control">
+                  <option value="web_speech">浏览器内置语音识别 (Web Speech API - 零延迟开销)</option>
+                  <option value="text_only">仅文字键盘交互 (关闭麦克风)</option>
+                </select>
+              </div>
+
+              <div class="form-group full-width">
+                <div class="form-label-row">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="chk-auto-interrupt" checked>
+                    <span>启用说话打断机制 (当用户点击打断或输入新内容时停止 AI 发音)</span>
+                  </label>
+                  <button type="button" class="btn-field-reset" data-reset="chk-auto-interrupt" title="恢复默认开启">↺ 恢复默认</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 5. Key Vault Tab -->
+          <section id="tab-vault" class="tab-pane">
+            <div class="section-desc">
+              统一查看与集中维护所有大模型与语音 Provider 的 API 密钥。本系统直接调用 <strong>微软 Windows 原生 DPAPI (CryptProtectData)</strong>，使用操作系统级凭据主密钥硬件级加密，密文统一集中保存在用户资料目录中的 <code>keys.enc</code>，换机升级零泄露。
+            </div>
+
+            <div class="vault-cards-grid" id="vault-cards-container">
+              <!-- Dynamically populated from /api/settings/keys -->
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Settings Footer Actions -->
+      <div class="settings-footer">
+        <div class="footer-status" id="save-status-msg"></div>
+        <div class="footer-buttons">
+          <button id="btn-open-character" class="btn-secondary">👤 打开角色设置</button>
+          <button id="btn-cancel-settings" class="btn-secondary">关闭</button>
+          <button id="btn-save-settings" class="btn-primary">
+            <span>💾 保存并应用</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./settings.js"></script>
+</body>
+</html>

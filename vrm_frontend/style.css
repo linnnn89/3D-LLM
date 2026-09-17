@@ -989,3 +989,60 @@ body, html {
   box-shadow: 0 6px 20px rgba(255, 117, 140, 0.55);
 }
 
+/* ===== 全局设置存档（3 个槽位）===== */
+.profile-strip {
+  margin: 12px 0 18px;
+  padding: 13px 15px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+.profile-strip-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 11px; flex-wrap: wrap; }
+.profile-strip-title { font-weight: 600; font-size: 13px; color: #eae8f2; }
+.profile-strip-head small { color: #8b88a0; font-size: 11px; }
+
+.profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 760px) { .profile-grid { grid-template-columns: 1fr; } }
+
+.profile-card {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 11px 12px; border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: border-color .18s ease, background .18s ease;
+}
+.profile-card.is-active {
+  border-color: rgba(255, 120, 170, 0.55);
+  background: rgba(255, 120, 170, 0.07);
+}
+.profile-card.pc-empty { opacity: .78; }
+
+.pc-top { display: flex; align-items: center; gap: 6px; }
+.pc-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12px; font-weight: 600;
+  background: transparent; border: none; border-bottom: 1px dashed rgba(255,255,255,.18);
+  color: #eae8f2; padding: 2px 0;
+}
+.pc-name:focus { outline: none; border-bottom-color: rgba(255,120,170,.7); }
+.pc-badge {
+  flex: 0 0 auto; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+  background: #ff78aa; color: #fff; white-space: nowrap;
+}
+
+.pc-summary { display: flex; flex-direction: column; gap: 2px; min-height: 46px; }
+.pc-line { font-size: 11px; color: #cfccdd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-line.pc-dim { color: #83809a; font-size: 10px; }
+
+.pc-actions { display: flex; gap: 6px; margin-top: 2px; }
+.pc-actions button {
+  flex: 1 1 0; font-size: 11px; padding: 5px 0; cursor: pointer;
+  border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06); color: #cfccdd;
+  transition: background .16s ease, border-color .16s ease;
+}
+.pc-actions button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.pc-actions button:disabled { opacity: .38; cursor: not-allowed; }
+.pc-apply { background: rgba(255, 120, 170, 0.16) !important; border-color: rgba(255, 120, 170, 0.45) !important; color: #ffd4e6 !important; }
+.pc-apply:hover:not(:disabled) { background: rgba(255, 120, 170, 0.28) !important; }
+.pc-hint { font-size: 10px; color: #7d7a90; }

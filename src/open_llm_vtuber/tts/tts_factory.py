@@ -17,7 +17,11 @@ class TTSFactory:
                 reference_id=kwargs.get("reference_id"),
                 latency=kwargs.get("latency", "balanced"),
                 base_url=kwargs.get("base_url", "https://api.fish.audio"),
-                model=kwargs.get("model", "s2-pro-free"),
+                model=kwargs.get("model", "s2.1-pro-free"),
+                format=kwargs.get("format", "wav"),
+                temperature=kwargs.get("temperature", 0.7),
+                top_p=kwargs.get("top_p", 0.7),
+                speed=kwargs.get("speed", 1.0),
             )
         elif engine_type == "edge_tts":
             from .edge_tts import TTSEngine as EdgeTTSEngine

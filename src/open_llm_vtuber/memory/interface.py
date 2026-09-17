@@ -1,7 +1,6 @@
 import logging
+import threading
 from typing import Optional, List, Tuple, Dict, Callable, Awaitable, Any
-
-logger = logging.getLogger(__name__)
 
 from .models import (
     MemoryBank,
@@ -9,11 +8,29 @@ from .models import (
     MemorySettings,
     MemoryTaskStatus,
     CompleteTurn,
-    HistorySnippet,
 )
 from .repository import MemoryRepository
 from .service import MemoryService
 from .prompts import MEMORY_RECALL_TEMPLATE
+
+logger = logging.getLogger(__name__)
+
+_character_registry: Dict[str, Dict[str, str]] = {}
+
+
+def register_character_info(character_id: str, info: Dict[str, str]) -> None:
+    """Remember name/persona for a character so memory synthesis prompts can use them."""
+    if character_id:
+        _character_registry[character_id] = dict(info)
+
+
+def _default_character_info(character_id: str) -> Dict[str, str]:
+    info = _character_registry.get(character_id, {})
+    return {
+        "name": info.get("name") or character_id,
+        "persona": info.get("persona", ""),
+        "user_profile": info.get("user_profile", ""),
+    }
 
 
 class MemoryInterface:
@@ -34,14 +51,28 @@ class MemoryInterface:
         self.repository = MemoryRepository(db_path=db_path)
         self.service = MemoryService(
             repository=self.repository,
-            llm_generate_fn=llm_generate_fn or self._default_mock_llm,
-            get_character_info_fn=get_character_info_fn,
+            llm_generate_fn=llm_generate_fn or self._missing_llm,
+            get_character_info_fn=get_character_info_fn or _default_character_info,
             settings=self.settings,
         )
 
-    async def _default_mock_llm(self, messages: list, settings: Any) -> str:
-        logger.warning("[MemoryInterface] No llm_generate_fn supplied; using mock response.")
-        return "（未配置记忆提炼LLM函数，这是默认生成的记忆占位符）"
+    async def _missing_llm(self, messages: list, settings: Any) -> str:
+        """Fail loudly instead of persisting a placeholder as the character's memory."""
+        raise RuntimeError(
+            "Memory subsystem has no LLM bound; refusing to synthesize a memory entry."
+        )
+
+    def set_llm_generate(
+        self, llm_generate_fn: Optional[Callable[[list, Any], Awaitable[str]]]
+    ) -> None:
+        """Bind the LLM used to synthesize memory updates and compressions."""
+        if llm_generate_fn is not None:
+            self.service.llm_generate = llm_generate_fn
+
+    def refresh_settings(self, settings: MemorySettings) -> None:
+        """Apply freshly loaded settings to the running subsystem."""
+        self.settings = settings
+        self.service.settings = settings
 
     def get_prompt_injection(
         self,
@@ -156,3 +187,32 @@ class MemoryInterface:
         """Cleanly close database and cancel running tasks."""
         self.service.dispose()
         self.repository.close()
+
+
+_shared_interface: Optional[MemoryInterface] = None
+_shared_lock = threading.Lock()
+
+
+def get_shared_interface() -> MemoryInterface:
+    """Return the process-wide MemoryInterface, creating it on first use.
+
+    The subsystem owns a SQLite connection, so every session shares one instance
+    rather than opening a connection per WebSocket client.
+    """
+    global _shared_interface
+    if _shared_interface is None:
+        with _shared_lock:
+            if _shared_interface is None:
+                from .config import load_memory_settings
+
+                _shared_interface = MemoryInterface(settings=load_memory_settings())
+    return _shared_interface
+
+
+def reset_shared_interface() -> None:
+    """Close and drop the shared instance (used by tests and shutdown)."""
+    global _shared_interface
+    with _shared_lock:
+        if _shared_interface is not None:
+            _shared_interface.close()
+            _shared_interface = None

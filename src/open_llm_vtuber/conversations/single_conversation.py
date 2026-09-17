@@ -1,6 +1,7 @@
 from typing import Union, List, Dict, Any, Optional
 import asyncio
 import json
+import uuid
 from loguru import logger
 import numpy as np
 
@@ -59,12 +60,34 @@ async def process_single_conversation(
             user_input, context.asr_engine, websocket_send
         )
 
+        # Long-term memory: recall the character's memory bank plus relevant past
+        # turns and hand them to the agent as prompt-only context.
+        batch_metadata = dict(metadata) if metadata else {}
+        memory_interface = context.memory_interface
+        if memory_interface is not None and input_text:
+            try:
+                bank_text, recall_text = memory_interface.get_prompt_injection(
+                    character_id=context.character_config.conf_uid,
+                    session_id=context.history_uid or "",
+                    user_text=input_text,
+                )
+                memory_context = "\n\n".join(
+                    part for part in (bank_text, recall_text) if part
+                )
+                if memory_context:
+                    batch_metadata["memory_context"] = memory_context
+                    logger.debug(
+                        f"Recalled {len(memory_context)} chars of long-term memory."
+                    )
+            except Exception as e:
+                logger.error(f"Failed to build long-term memory context: {e}")
+
         # Create batch input
         batch_input = create_batch_input(
             input_text=input_text,
             images=images,
             from_name=context.character_config.human_name,
-            metadata=metadata,
+            metadata=batch_metadata,
         )
 
         # Store user message (check if we should skip storing to history)
@@ -158,6 +181,26 @@ async def process_single_conversation(
                 avatar=context.character_config.avatar,
             )
             logger.info(f"AI response: {full_response}")
+
+            # Index the completed turn for long-term memory. Once enough turns
+            # accumulate, the memory service schedules background synthesis.
+            if (
+                context.memory_interface is not None
+                and input_text
+                and not skip_history
+            ):
+                try:
+                    turn_key = uuid.uuid4().hex
+                    context.memory_interface.record_turn(
+                        character_id=context.character_config.conf_uid,
+                        session_id=context.history_uid,
+                        user_id=f"{turn_key}:user",
+                        user_content=input_text,
+                        assistant_id=f"{turn_key}:assistant",
+                        assistant_content=full_response,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to index turn into long-term memory: {e}")
 
         return full_response  # Return accumulated full_response
 

@@ -16,9 +16,15 @@ from .models import (
     MemoryGenerationSettings,
     MemoryTaskStatus,
 )
+from .config import DEFAULT_MEMORY_SETTINGS, load_memory_settings
 from .repository import MemoryRepository
 from .service import MemoryService
-from .interface import MemoryInterface
+from .interface import (
+    MemoryInterface,
+    get_shared_interface,
+    register_character_info,
+    reset_shared_interface,
+)
 
 __all__ = [
     "MemoryBank",
@@ -30,7 +36,12 @@ __all__ = [
     "HistoryRetrievalSettings",
     "MemoryGenerationSettings",
     "MemoryTaskStatus",
+    "DEFAULT_MEMORY_SETTINGS",
+    "load_memory_settings",
     "MemoryRepository",
     "MemoryService",
     "MemoryInterface",
+    "get_shared_interface",
+    "register_character_info",
+    "reset_shared_interface",
 ]

@@ -250,6 +250,15 @@ class BasicMemoryAgent(AgentInterface):
         )
         messages = history.copy()
         user_content = []
+
+        # Long-term memory is injected into the outgoing prompt only. It is kept
+        # out of self._memory on purpose so the rolling history window stays small.
+        memory_context = ""
+        if input_data.metadata:
+            memory_context = (input_data.metadata.get("memory_context") or "").strip()
+        if memory_context:
+            user_content.append({"type": "text", "text": memory_context})
+
         text_prompt = self._to_text_prompt(input_data)
         if text_prompt:
             user_content.append({"type": "text", "text": text_prompt})
@@ -667,6 +676,40 @@ class BasicMemoryAgent(AgentInterface):
                     self._add_message(complete_response, "assistant")
 
         return chat_with_memory
+
+    async def generate_memory_text(self, messages: List[Dict[str, Any]]) -> str:
+        """Non-streaming completion used by the long-term memory subsystem.
+
+        Reuses the agent's own LLM so synthesized memories follow the same model
+        and credentials as the conversation itself.
+        """
+        system_prompt = ""
+        chat_messages: List[Dict[str, Any]] = []
+        for message in messages:
+            if message.get("role") == "system":
+                system_prompt = message.get("content", "")
+            else:
+                chat_messages.append(message)
+
+        chunks: List[str] = []
+        async for event in self._llm.chat_completion(chat_messages, system_prompt):
+            if isinstance(event, str):
+                chunks.append(event)
+            elif isinstance(event, dict) and event.get("type") == "text_delta":
+                chunks.append(event.get("text", ""))
+
+        text = "".join(chunks).strip()
+        # The OpenAI-compatible client yields error text rather than raising, and
+        # that text must never be persisted as the character's long-term memory.
+        if (
+            not text
+            or text == "__API_NOT_SUPPORT_TOOLS__"
+            or text.startswith("Error calling the chat endpoint")
+        ):
+            raise RuntimeError(
+                f"Memory LLM did not return usable text: {text[:120]!r}"
+            )
+        return text
 
     async def chat(
         self,

@@ -95,40 +95,38 @@ class MemoryService:
             asyncio.create_task(self._drain(character_id))
 
     async def _drain(self, character_id: str):
-        """Sequentially process pending sessions for a character."""
-        if self._disposed:
-            return
+        """Sequentially process pending sessions for a character until the queue drains."""
+        while True:
+            if self._disposed:
+                return
 
-        queue = self._pending_queues.get(character_id)
-        if not queue:
-            self._pending_queues.pop(character_id, None)
-            return
+            queue = self._pending_queues.get(character_id)
+            if not queue:
+                self._pending_queues.pop(character_id, None)
+                return
 
-        if not self.settings.auto_generate_enabled or self.repository.read_draft(character_id):
-            self._pending_queues.pop(character_id, None)
-            return
+            if not self.settings.auto_generate_enabled or self.repository.read_draft(character_id):
+                self._pending_queues.pop(character_id, None)
+                return
 
-        session_id = next(iter(queue))
-        queue.remove(session_id)
+            session_id = next(iter(queue))
+            queue.remove(session_id)
 
-        # Verify pending turns still meet requirement
-        pending = self.repository.pending_turns(character_id, session_id)
-        if pending < self.settings.update_interval_turns:
-            await self._drain(character_id)
-            return
+            # Verify pending turns still meet requirement
+            pending = self.repository.pending_turns(character_id, session_id)
+            if pending < self.settings.update_interval_turns:
+                continue
 
-        try:
-            task = asyncio.create_task(
-                self._run_task(character_id, "update", session_id, automatic=True)
-            )
-            self._running_tasks[character_id] = task
-            await task
-        except Exception as e:
-            logger.warning(f"[MemoryService] Background memory update for {character_id} failed: {e}")
-        finally:
-            self._running_tasks.pop(character_id, None)
-            # Continue draining next batch if available
-            await self._drain(character_id)
+            try:
+                task = asyncio.create_task(
+                    self._run_task(character_id, "update", session_id, automatic=True)
+                )
+                self._running_tasks[character_id] = task
+                await task
+            except Exception as e:
+                logger.warning(f"[MemoryService] Background memory update for {character_id} failed: {e}")
+            finally:
+                self._running_tasks.pop(character_id, None)
 
     async def update(self, character_id: str, session_id: str) -> MemoryDraft:
         """Manually trigger memory update and produce an editable draft."""

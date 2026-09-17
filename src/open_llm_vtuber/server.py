@@ -41,6 +41,12 @@ class CORSStaticFiles(StarletteStaticFiles):
         if path.endswith(".js"):
             response.headers["Content-Type"] = "application/javascript"
 
+        # 未设置 Cache-Control 时浏览器会按 Last-Modified 做启发式缓存，
+        # 导致修改 vrm_frontend/ 后套壳视口仍然加载旧文件。no-cache 表示"可缓存但每次必须校验"，
+        # 文件未变时走 304，文件变更时立刻生效。
+        if path.endswith((".js", ".mjs", ".html", ".css")):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+
         return response
 
 

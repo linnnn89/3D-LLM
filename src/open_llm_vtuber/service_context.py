@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 from typing import Callable
 from loguru import logger
 from fastapi import WebSocket
@@ -68,6 +69,9 @@ class ServiceContext:
         self.mcp_prompt: str = ""
 
         self.history_uid: str = ""  # Add history_uid field
+
+        # Long-term memory subsystem, shared process-wide across sessions
+        self.memory_interface = None
 
         self.send_text: Callable = None
         self.client_uid: str = None
@@ -406,10 +410,51 @@ class ServiceContext:
             # Save the current configuration
             self.character_config.agent_config = agent_config
             self.system_prompt = system_prompt
+            self._init_memory(agent_config, persona_prompt)
 
         except Exception as e:
             logger.error(f"Failed to initialize agent: {e}")
             raise
+
+    def _init_memory(self, agent_config: AgentConfig, persona_prompt: str = "") -> None:
+        """Attach the process-wide long-term memory subsystem to this session.
+
+        The subsystem owns a SQLite connection, so all sessions share one instance
+        while the LLM used for memory synthesis is rebound to the current agent.
+        """
+        try:
+            from .memory import (
+                get_shared_interface,
+                load_memory_settings,
+                register_character_info,
+            )
+
+            memory = get_shared_interface()
+            memory.refresh_settings(load_memory_settings())
+
+            character_config = self.character_config
+            if character_config:
+                register_character_info(
+                    character_config.conf_uid,
+                    {
+                        "name": character_config.character_name or "",
+                        "persona": persona_prompt or character_config.persona_prompt or "",
+                    },
+                )
+
+            if hasattr(self.agent_engine, "generate_memory_text"):
+                memory.set_llm_generate(self.agent_engine.generate_memory_text)
+            else:
+                logger.warning(
+                    f"Agent {type(self.agent_engine).__name__} cannot synthesize memories; "
+                    "automatic memory updates stay unavailable for this session."
+                )
+
+            self.memory_interface = memory
+            logger.info("Long-term memory subsystem attached.")
+        except Exception as e:
+            logger.error(f"Failed to initialize the long-term memory subsystem: {e}")
+            self.memory_interface = None
 
     def init_translate(self, translator_config: TranslatorConfig) -> None:
         """Initialize or update the translation engine based on the configuration."""
@@ -512,6 +557,45 @@ class ServiceContext:
                 new_character_config_data = deep_merge(
                     self.config.character_config.model_dump(), alt_config_data
                 )
+
+                # LLM / API 提供商配置为**全局共用**：始终以 conf.yaml 的 agent_config 为准，
+                # 角色 yaml 不允许覆盖它（否则每切一个角色就会换一套 LLM 提供商与密钥池）。
+                # 每次切换都重新读取 conf.yaml，保证在设置面板里改完 LLM 后立刻生效。
+                global_character_config = (
+                    read_yaml("conf.yaml").get("character_config") or {}
+                )
+                if global_character_config.get("agent_config"):
+                    new_character_config_data["agent_config"] = (
+                        global_character_config["agent_config"]
+                    )
+
+                # TTS：引擎与全部合成参数同样**全局共用**，角色 yaml 只允许覆盖"音色"
+                # （fish 的 reference_id / edge 的 voice）。
+                # 理由：同一套引擎参数对每个角色重复存一份，改一次就要改 N 个文件，
+                # 而且很容易各角色不一致；音色才是真正随角色走的东西。
+                global_tts = global_character_config.get("tts_config") or {}
+                if global_tts:
+                    local_tts = new_character_config_data.get("tts_config") or {}
+                    merged_tts = copy.deepcopy(global_tts)
+
+                    # 引擎选择以全局为准；全局未指定时才接受角色 yaml 的声明
+                    if not merged_tts.get("tts_model") and local_tts.get("tts_model"):
+                        merged_tts["tts_model"] = local_tts["tts_model"]
+                    engine = merged_tts.get("tts_model", "fish_api_tts")
+
+                    # 只搬运"音色"这一个角色属性
+                    if engine == "fish_api_tts":
+                        rid = (local_tts.get("fish_api_tts") or {}).get("reference_id")
+                        if rid:
+                            merged_tts.setdefault("fish_api_tts", {})[
+                                "reference_id"
+                            ] = rid
+                    elif engine == "edge_tts":
+                        voice = (local_tts.get("edge_tts") or {}).get("voice")
+                        if voice:
+                            merged_tts.setdefault("edge_tts", {})["voice"] = voice
+
+                    new_character_config_data["tts_config"] = merged_tts
 
             if new_character_config_data:
                 new_config = {
