@@ -150,6 +150,13 @@ async def process_user_input(
 ) -> str:
     """Process user input, converting audio to text if needed"""
     if isinstance(user_input, np.ndarray):
+        if asr_engine is None:
+            err_msg = "ASR 语音识别未初始化（如需语音麦克风输入，请在 conf.yaml 中配置云端 ASR API 或准备离线模型；文字聊天不受影响）"
+            logger.error(err_msg)
+            await websocket_send(
+                json.dumps({"type": "error", "message": err_msg})
+            )
+            return ""
         logger.info("Transcribing audio input...")
         input_text = await asr_engine.async_transcribe_np(user_input)
         await websocket_send(

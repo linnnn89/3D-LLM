@@ -311,14 +311,16 @@ class GPTSoVITSConfig(I18nMixin):
 class FishAPITTSConfig(I18nMixin):
     """Configuration for Fish API TTS."""
 
-    api_key: str = Field(..., alias="api_key")
-    reference_id: str = Field(..., alias="reference_id")
-    latency: Literal["normal", "balanced"] = Field(..., alias="latency")
-    base_url: str = Field(..., alias="base_url")
+    api_key: str = Field("", alias="api_key")
+    reference_id: str = Field("7f92f8afb8ec43bf81429cc1c9199cb1", alias="reference_id")
+    latency: Literal["normal", "balanced"] = Field("balanced", alias="latency")
+    base_url: str = Field("https://api.fish.audio", alias="base_url")
+    model: str = Field("s2-pro-free", alias="model")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "api_key": Description(
-            en="API key for Fish TTS service", zh="Fish TTS 服务的 API 密钥"
+            en="API key for Fish TTS service (can be loaded from DPAPI Key Vault)",
+            zh="Fish TTS 服务的 API 密钥（可留空从 Windows DPAPI 密钥库加载）",
         ),
         "reference_id": Description(
             en="Voice reference ID from Fish Audio website",
@@ -329,6 +331,10 @@ class FishAPITTSConfig(I18nMixin):
         ),
         "base_url": Description(
             en="Base URL for Fish TTS API", zh="Fish TTS API 的基础 URL"
+        ),
+        "model": Description(
+            en="Fish Audio model name (default: s2-pro-free)",
+            zh="Fish Audio 模型名称（默认：s2-pro-free）",
         ),
     }
 

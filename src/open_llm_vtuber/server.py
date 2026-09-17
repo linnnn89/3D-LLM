@@ -8,15 +8,19 @@ It uses FastAPI for the server and Starlette for static file serving.
 
 import os
 import shutil
+import mimetypes
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from starlette.responses import Response, RedirectResponse
 from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 
 from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route
+from .settings_router import init_settings_routes
 from .service_context import ServiceContext
 from .config_manager.utils import Config
+
+mimetypes.add_type("model/gltf-binary", ".vrm")
 
 
 # Create a custom StaticFiles class that adds CORS headers
@@ -96,6 +100,9 @@ class WebSocketServer:
         self.app.include_router(
             init_webtool_routes(default_context_cache=self.default_context_cache),
         )
+        self.app.include_router(
+            init_settings_routes(default_context_cache=self.default_context_cache),
+        )
 
         # Initialize and include proxy routes if proxy is enabled
         system_config = config.system_config
@@ -134,11 +141,27 @@ class WebSocketServer:
             name="avatars",
         )
 
-        # Mount web tool directory separately from frontend
+        # Mount VRM models directory
+        if not os.path.exists("vrm-models"):
+            os.makedirs("vrm-models")
         self.app.mount(
-            "/web-tool",
-            CORSStaticFiles(directory="web_tool", html=True),
-            name="web_tool",
+            "/vrm-models",
+            CORSStaticFiles(directory="vrm-models"),
+            name="vrm-models",
+        )
+
+        # Mount 3D VRM frontend
+        if not os.path.exists("vrm_frontend"):
+            os.makedirs("vrm_frontend")
+
+        @self.app.get("/vrm", include_in_schema=False)
+        async def redirect_to_vrm():
+            return RedirectResponse(url="/vrm/")
+
+        self.app.mount(
+            "/vrm",
+            CORSStaticFiles(directory="vrm_frontend", html=True),
+            name="vrm_frontend",
         )
 
         # Mount main frontend last (as catch-all)

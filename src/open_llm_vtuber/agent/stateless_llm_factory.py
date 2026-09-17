@@ -32,13 +32,45 @@ class LLMFactory:
             or llm_provider == "mistral_llm"
             or llm_provider == "lmstudio_llm"
         ):
+            base_url = (kwargs.get("base_url") or "").strip().rstrip("/")
+            # Enforce base_url stops at /v1 (remove any trailing /chat or /chat/completions)
+            if base_url.endswith("/chat/completions"):
+                base_url = base_url[:-len("/chat/completions")].rstrip("/")
+            elif base_url.endswith("/chat"):
+                base_url = base_url[:-len("/chat")].rstrip("/")
+
+            api_key = kwargs.get("llm_api_key")
+            if not api_key or api_key in ("KEY_VAULT", "default_api_key", "z"):
+                try:
+                    from ..security.key_vault import vault
+                    detected = None
+                    lower_url = base_url.lower()
+                    lower_model = str(kwargs.get("model") or "").lower()
+                    if "deepseek" in lower_url or "deepseek" in lower_model:
+                        detected = "deepseek"
+                    elif "openrouter" in lower_url:
+                        detected = "openrouter"
+                    elif "commandcode" in lower_url:
+                        detected = "commandcode"
+                    elif "opencode" in lower_url:
+                        detected = "opencode"
+
+                    if detected:
+                        vault_key = vault.get_key(detected)
+                        if vault_key:
+                            api_key = vault_key
+                    if not api_key or api_key in ("KEY_VAULT", "default_api_key", "z"):
+                        api_key = vault.get_key("custom") or vault.get_key("openai") or api_key
+                except Exception as err:
+                    logger.warning(f"Failed to lookup key from vault: {err}")
+
             return OpenAICompatibleLLM(
                 model=kwargs.get("model"),
-                base_url=kwargs.get("base_url"),
-                llm_api_key=kwargs.get("llm_api_key"),
+                base_url=base_url,
+                llm_api_key=api_key or "z",
                 organization_id=kwargs.get("organization_id"),
                 project_id=kwargs.get("project_id"),
-                temperature=kwargs.get("temperature"),
+                temperature=kwargs.get("temperature", 1.0),
             )
         if llm_provider == "stateless_llm_with_template":
             return StatelessLLMWithTemplate(

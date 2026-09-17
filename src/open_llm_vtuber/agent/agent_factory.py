@@ -83,6 +83,9 @@ class AgentFactory:
                 tool_manager=tool_manager,
                 tool_executor=tool_executor,
                 mcp_prompt_string=mcp_prompt_string,
+                max_history_messages=basic_memory_settings.get(
+                    "max_history_messages", 15
+                ),
             )
 
         elif conversation_agent_choice == "mem0_agent":

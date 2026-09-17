@@ -76,3 +76,22 @@ private/
 mcp_servers.json
 
 .vscode/
+
+# Windows DPAPI Encrypted Vault & Keys
+*.enc
+data/keys.enc
+data/
+
+# Shortcuts & Binaries
+*.lnk
+app/*.exe
+app/__pycache__/
+
+# Screenshots & Test Captures
+vrm_*.png
+screenshot*.png
+*.tmp
+
+# VRM models (large binary 3D assets)
+/vrm-models/*
+!/vrm-models/README.md

@@ -49,10 +49,12 @@ class BasicMemoryAgent(AgentInterface):
         tool_manager: Optional[ToolManager] = None,
         tool_executor: Optional[ToolExecutor] = None,
         mcp_prompt_string: str = "",
+        max_history_messages: int = 15,
     ):
         """Initialize agent with LLM and configuration."""
         super().__init__()
         self._memory = []
+        self.max_history_messages = max_history_messages
         self._live2d_model = live2d_model
         self._tts_preprocessor_config = tts_preprocessor_config
         self._faster_first_response = faster_first_response
@@ -240,8 +242,13 @@ class BasicMemoryAgent(AgentInterface):
         return "\n".join(message_parts).strip()
 
     def _to_messages(self, input_data: BatchInput) -> List[Dict[str, Any]]:
-        """Prepare messages for LLM API call."""
-        messages = self._memory.copy()
+        """Prepare messages for LLM API call with rolling history window."""
+        history = (
+            self._memory[-self.max_history_messages :]
+            if self.max_history_messages > 0
+            else self._memory
+        )
+        messages = history.copy()
         user_content = []
         text_prompt = self._to_text_prompt(input_data)
         if text_prompt:
