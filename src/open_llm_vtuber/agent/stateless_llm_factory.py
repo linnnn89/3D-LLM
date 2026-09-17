@@ -46,14 +46,22 @@ class LLMFactory:
                     detected = None
                     lower_url = base_url.lower()
                     lower_model = str(kwargs.get("model") or "").lower()
-                    if "deepseek" in lower_url or "deepseek" in lower_model:
-                        detected = "deepseek"
-                    elif "openrouter" in lower_url:
+
+                    # 先按**端点 Host** 判断 —— 它才是"密钥属于哪家"的权威依据。
+                    # 若先看模型名，OpenRouter 上跑 deepseek/* 这类模型时会误取
+                    # DeepSeek 官方端点的密钥，表现为 401（且报错常是
+                    # "Missing Authentication header"，极易误判成密钥为空）。
+                    if "openrouter" in lower_url:
                         detected = "openrouter"
                     elif "commandcode" in lower_url:
                         detected = "commandcode"
                     elif "opencode" in lower_url:
                         detected = "opencode"
+                    elif "deepseek" in lower_url:
+                        detected = "deepseek"
+                    # 仅当端点无法识别时，才退回按模型名推断
+                    elif "deepseek" in lower_model:
+                        detected = "deepseek"
 
                     if detected:
                         vault_key = vault.get_key(detected)

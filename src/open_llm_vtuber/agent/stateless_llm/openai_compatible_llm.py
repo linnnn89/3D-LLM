@@ -3,7 +3,10 @@ This class is responsible for handling asynchronous interaction with OpenAI API 
 endpoints for language generation.
 """
 
+import re
 from typing import AsyncIterator, List, Dict, Any
+from urllib.parse import urlparse
+
 from openai import (
     AsyncStream,
     AsyncOpenAI,
@@ -19,6 +22,93 @@ from loguru import logger
 
 from .stateless_llm_interface import StatelessLLMInterface
 from ...mcpp.types import ToolCallObject
+
+
+# OpenRouter 上思考是**强制性**的模型，关不掉（参照 live2Dchat 的清单）。
+_FORCED_REASONING_MODELS = {"deepseek-r1", "deepseek-r1-0528"}
+
+# 响应开头的思考块标签。只有**开头**的这类块才是元数据，
+# 正文中间出现的标签应当原样保留。
+_LEADING_THINK_RE = re.compile(r"<(think|thinking|analysis)>", re.IGNORECASE)
+
+
+def openrouter_reasoning_off(base_url: str, model: str) -> bool:
+    """判断是否应为该模型显式关闭"思考"。
+
+    OpenRouter 上的 DeepSeek 推理模型默认会输出思考内容，这些内容会混进
+    语音合成与前端对话流（表现为角色念出一大段推理过程）。参照 live2Dchat
+    的做法：对支持该开关的模型传 `reasoning={"enabled": false}`。
+
+    仅对 OpenRouter 且模型 id 以 `deepseek/` 开头时生效；deepseek-r1 系列的
+    思考是强制性的，传了也没用，这里直接跳过。
+    """
+    try:
+        if (urlparse(base_url).hostname or "") != "openrouter.ai":
+            return False
+    except Exception:
+        return False
+
+    model_id = (model or "").strip().lower().split(":")[0]
+    if not model_id.startswith("deepseek/"):
+        return False
+    return model_id[len("deepseek/") :] not in _FORCED_REASONING_MODELS
+
+
+class _LeadingReasoningStripper:
+    """流式剥离响应**开头**的思考块（`<think>…</think>` 等）。
+
+    我们是边收边发（每个 chunk 直接送 TTS），所以不能像非流式那样"收完再剥" ——
+    标签可能被切在 chunk 边界上。这里用一个最小状态机：
+
+    - 在确认开头是否为主题块之前，先缓冲；
+    - 一旦确认**不是**标签，立刻把缓冲原样吐出，之后全程透传（正文里的
+      标签因此不会被误伤）；
+    - 是标签则丢弃到匹配的结束标签，其余内容照常输出。
+    """
+
+    _MAX_PROBE = 24  # 超过这个长度还判不出来，就当它不是标签
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._state = "probing"  # probing -> skipping -> passthrough
+        self._closing = ""
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        if self._state == "passthrough":
+            return text
+
+        self._buffer += text
+
+        if self._state == "probing":
+            stripped = self._buffer.lstrip()
+            match = _LEADING_THINK_RE.match(stripped)
+            if match:
+                self._state = "skipping"
+                self._closing = f"</{match.group(1)}>"
+                self._buffer = stripped[match.end() :]
+            elif len(stripped) < self._MAX_PROBE and stripped.startswith("<"):
+                return ""  # 还可能是标签，继续攒
+            else:
+                self._state = "passthrough"
+                out, self._buffer = self._buffer, ""
+                return out
+
+        if self._state == "skipping":
+            idx = self._buffer.lower().find(self._closing)
+            if idx == -1:
+                if len(self._buffer) > 8192:  # 兜底：别无限攒下去
+                    self._state = "passthrough"
+                    out, self._buffer = self._buffer, ""
+                    return out
+                return ""
+            out = self._buffer[idx + len(self._closing) :].lstrip()
+            self._state = "passthrough"
+            self._buffer = ""
+            return out
+
+        return text
 
 
 class AsyncLLM(StatelessLLMInterface):
@@ -53,8 +143,14 @@ class AsyncLLM(StatelessLLMInterface):
         )
         self.support_tools = True
 
+        # OpenRouter 的 DeepSeek 推理模型默认会输出思考内容，一旦混进
+        # 对话流就会被送去 TTS —— 表现为角色念出一大段推理过程。
+        # 参照 live2Dchat：对支持该开关的模型显式传 reasoning={"enabled": false}。
+        self.reasoning_off = openrouter_reasoning_off(base_url, model)
+
         logger.info(
             f"Initialized AsyncLLM with the parameters: {self.base_url}, {self.model}"
+            + ("  [已关闭思考输出]" if self.reasoning_off else "")
         )
 
     async def chat_completion(
@@ -105,10 +201,21 @@ class AsyncLLM(StatelessLLMInterface):
                 stream=True,
                 temperature=self.temperature,
                 tools=available_tools,
+                # DeepSeek 推理模型默认会输出思考内容，一旦混进对话流就会
+                # 被送去 TTS。可关闭的模型在这里显式关掉（见 __init__）。
+                extra_body=(
+                    {"reasoning": {"enabled": False}}
+                    if self.reasoning_off
+                    else NOT_GIVEN
+                ),
             )
             logger.debug(
                 f"Tool Support: {self.support_tools}, Available tools: {available_tools}"
             )
+
+            # 兜底：万一服务端仍然吐出思考块（例如思考不可关闭的模型），
+            # 只剥离**开头**的那一段，正文里的标签原样保留。
+            stripper = _LeadingReasoningStripper()
 
             async for chunk in stream:
                 # Guard against chunks with missing choices field (e.g., from OpenWebUI)
@@ -187,7 +294,9 @@ class AsyncLLM(StatelessLLMInterface):
                     continue
                 elif chunk.choices[0].delta.content is None:
                     chunk.choices[0].delta.content = ""
-                yield chunk.choices[0].delta.content
+                text = stripper.feed(chunk.choices[0].delta.content)
+                if text:
+                    yield text
 
             # If stream ends while still in a tool call, make sure to yield the tool call
             if in_tool_call and accumulated_tool_calls:

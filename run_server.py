@@ -1,5 +1,6 @@
 import os
 import sys
+import socket
 import atexit
 import asyncio
 import argparse
@@ -9,6 +10,65 @@ import tomli
 import uvicorn
 from loguru import logger
 from upgrade_codes.upgrade_manager import UpgradeManager
+
+
+def _heal_unreachable_system_proxy() -> None:
+    """修正 Windows 系统代理的两个常见坑，避免所有外网 API 全部失败。
+
+    **坑 1：scheme 被写错。** 注册表里通常只写 `127.0.0.1:7897`（没有 scheme），
+    而 CPython 的 `getproxies_registry()` 会给 https 硬拼上 `https://` 前缀。
+    httpx 拿到它就会**用 TLS 去连接代理本身**，必然握手失败，报
+    `EOF occurred in violation of protocol (_ssl.c:997)`。
+    代理的正确写法是 `http://`（HTTP CONNECT 隧道）。
+
+    **坑 2：残留失效代理。** 代理软件（Clash/Mihomo 等）退出后注册表设置常常
+    留着，端口已经没人监听，而 Python 的 urllib / requests / httpx 都会读它。
+
+    两种情况的共同症状：所有外网 API（LLM 端点、TTS 服务）统一连接失败，
+    但浏览器、curl、甚至 PowerShell 走直连却一切正常 —— 极难排查。
+
+    这里在启动时规范化 scheme 并探测可达性：可达就写入环境变量正常使用，
+    不可达就设 NO_PROXY 绕过。若用户显式设置了 HTTPS_PROXY，则完全尊重用户。
+    """
+    if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
+        return
+    try:
+        import urllib.request
+
+        system_proxies = urllib.request.getproxies()
+        proxy = system_proxies.get("https") or system_proxies.get("http")
+        if not proxy:
+            return
+
+        # 坑 1：代理一律走 http:// （CONNECT 隧道），去掉被误加的 https://
+        if proxy.startswith("https://"):
+            proxy = "http://" + proxy[len("https://") :]
+
+        # 坑 2：探测端口是否真的有人监听
+        host_port = proxy.split("://", 1)[-1].rstrip("/")
+        host, _, port = host_port.partition(":")
+        sock = socket.socket()
+        sock.settimeout(1.5)
+        try:
+            reachable = sock.connect_ex((host, int(port or 80))) == 0
+        finally:
+            sock.close()
+
+        if reachable:
+            os.environ["HTTP_PROXY"] = proxy
+            os.environ["HTTPS_PROXY"] = proxy
+            os.environ["http_proxy"] = proxy
+            os.environ["https_proxy"] = proxy
+            print(f"[proxy] 已规范化并使用系统代理: {proxy}")
+        else:
+            os.environ["NO_PROXY"] = "*"
+            os.environ["no_proxy"] = "*"
+            print(f"[proxy] 系统代理 {proxy} 不可达，已自动绕过（走直连）")
+    except Exception:
+        pass
+
+
+_heal_unreachable_system_proxy()
 
 from src.open_llm_vtuber.server import WebSocketServer
 from src.open_llm_vtuber.config_manager import Config, read_yaml, validate_config

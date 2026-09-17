@@ -1171,14 +1171,18 @@ function handleServerMessage(data) {
   switch (type) {
     case 'full-text':
       if (data.text === 'Thinking...') {
-        updateStatus('thinking', '思考中...');
+        markThinking();
       } else if (data.text) {
+        // 有实际内容回来，说明这一轮在推进，刷新空闲计时
+        touchStatusActivity();
         const currentName = (bubbleSender && bubbleSender.textContent) || 'AI';
         showDialogue(currentName, data.text);
       }
       break;
 
     case 'audio':
+      // 音频到达即视为本轮仍在进行，刷新空闲计时
+      touchStatusActivity();
       handleAudioMessage(data);
       break;
 
@@ -1245,7 +1249,7 @@ function sendTextMessage(text) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     userTranscript.textContent = `“${text}”`;
     userTranscript.style.display = 'block';
-    updateStatus('thinking', '思考中...');
+    markThinking();
 
     ws.send(JSON.stringify({
       type: 'text-input',
@@ -1267,6 +1271,27 @@ function interruptSpeech() {
 }
 
 // --- 6. UI Helpers ---
+
+// ===== 状态灯：「思考中」的自动复位 =====
+// 服务端只发 conversation-chain-start，没有明确的「对话结束」信号。
+// 所以改用「空闲计时」：收到任何进展（文本/音频）就刷新，静默一段时间后
+// 自动回到「在线就绪」。否则思考灯会一直亮着（TTS 失败时尤其明显）。
+const STATUS_IDLE_MS = 12000;
+let statusIdleTimer = null;
+
+function touchStatusActivity() {
+  if (statusIdleTimer !== null) clearTimeout(statusIdleTimer);
+  statusIdleTimer = setTimeout(() => {
+    statusIdleTimer = null;
+    updateStatus('connected', '在线就绪');
+  }, STATUS_IDLE_MS);
+}
+
+function markThinking() {
+  updateStatus('thinking', '思考中...');
+  touchStatusActivity();
+}
+
 function updateStatus(stateClass, text) {
   statusDot.className = 'status-dot ' + stateClass;
   statusText.textContent = text;
