@@ -153,20 +153,25 @@ def scan_config_alts_directory(config_alts_dir: str) -> list[dict]:
     )
 
     # Scan other configs
-    for root, _, files in os.walk(config_alts_dir):
-        for file in files:
-            if file.endswith(".yaml"):
-                config: dict = read_yaml(os.path.join(root, file))
-                config_files.append(
-                    {
-                        "filename": file,
-                        "name": config.get("character_config", {}).get(
-                            "conf_name", file
-                        )
-                        if config
-                        else file,
-                    }
-                )
+    # 只扫顶层目录，不递归：handle_config_switch 是用
+    # os.path.join(config_alts_dir, filename) 定位配置的，而这里返回的 filename
+    # 只有 basename，所以嵌套目录里的配置根本加载不到，列出来也点不动。
+    # `characters/_archived/` 这类归档目录正是靠这一点被排除在角色列表之外的。
+    if os.path.isdir(config_alts_dir):
+        for entry in os.scandir(config_alts_dir):
+            if not entry.is_file() or not entry.name.endswith(".yaml"):
+                continue
+            config: dict = read_yaml(entry.path)
+            config_files.append(
+                {
+                    "filename": entry.name,
+                    "name": config.get("character_config", {}).get(
+                        "conf_name", entry.name
+                    )
+                    if config
+                    else entry.name,
+                }
+            )
     logger.debug(f"Found config files: {config_files}")
     return config_files
 
@@ -174,8 +179,10 @@ def scan_config_alts_directory(config_alts_dir: str) -> list[dict]:
 def scan_bg_directory() -> list[str]:
     bg_files = []
     bg_dir = "backgrounds"
-    for root, _, files in os.walk(bg_dir):
-        for file in files:
-            if file.endswith((".jpg", ".jpeg", ".png", ".gif")):
-                bg_files.append(file)
+    # 只扫顶层：前端是用 `/bg/<filename>` 取图的，嵌套目录里的图片拼出来的 URL
+    # 会 404，列进选择器只会得到一个点不动的空背景。
+    if os.path.isdir(bg_dir):
+        for entry in os.scandir(bg_dir):
+            if entry.is_file() and entry.name.endswith((".jpg", ".jpeg", ".png", ".gif")):
+                bg_files.append(entry.name)
     return bg_files
