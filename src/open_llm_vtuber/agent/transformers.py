@@ -1,3 +1,4 @@
+import re
 from typing import AsyncIterator, Tuple, Callable, List, Union, Dict, Any
 from functools import wraps
 from .output_types import Actions, SentenceOutput, DisplayText
@@ -7,6 +8,10 @@ from ..config_manager import TTSPreprocessorConfig
 from ..utils.sentence_divider import SentenceDivider
 from ..utils.sentence_divider import SentenceWithTags, TagState
 from loguru import logger
+
+# 情绪标签的通用形态：``[joy]`` / ``[happy_2]`` 之类由提示词约定的短标记。
+# 只在模型没提供 emotionMap（例如 VRM 模式）或标签不在 map 中时用作兜底。
+_EMOTION_TAG_RE = re.compile(r"\[\s*[A-Za-z_][A-Za-z0-9_]{0,19}\s*\]")
 
 
 def sentence_divider(
@@ -100,10 +105,39 @@ def actions_extractor(live2d_model: Live2dModel):
     return decorator
 
 
-def display_processor():
+def display_processor(live2d_model: Live2dModel | None = None):
     """
     Decorator that processes text for display, passing through dicts.
+
+    除了处理 think 标签外，这里还负责**把情绪标签从显示文本中移除**。
+    情绪标签（如 ``[joy]``）是给角色表情用的元数据：actions_extractor 会把
+    它们解析成 actions.expressions，但句子文本本身仍带着标签。若不在这里
+    剥离，对话栏就会原样显示出 ``[joy]``。
+
+    （TTS 那条路有 filter_text 清洗，所以语音听起来是正常的；显示这条路
+    过去完全没有清洗，这正是「记忆里能提取、对话栏却带标签」的原因。）
     """
+
+    def _strip_emotion_tags(text: str) -> str:
+        """移除情绪标签。
+
+        优先用模型自带的 emotionMap 精确匹配；若模型没提供（例如 VRM 模式）
+        或标签不在 map 中，则退化为剥离形如 ``[joy]`` / ``[happy_2]`` 的短标签。
+        无标签时原样返回，避免对正文做无谓改动。
+        """
+        if not text or "[" not in text:
+            return text
+
+        cleaned = text
+        emo_map = getattr(live2d_model, "emo_map", None) if live2d_model else None
+        if emo_map:
+            cleaned = live2d_model.remove_emotion_keywords(cleaned)
+
+        if "[" in cleaned:
+            cleaned = _EMOTION_TAG_RE.sub("", cleaned)
+
+        # 标签被移除后可能留下多余空格，但保留原缩进语义
+        return cleaned
 
     def decorator(
         func: Callable[
@@ -138,6 +172,9 @@ def display_processor():
                                 text = "("
                             elif tag.state == TagState.END:
                                 text = ")"
+
+                    # 情绪标签是给表情用的元数据，不应出现在对话栏里
+                    text = _strip_emotion_tags(text)
 
                     display = DisplayText(text=text)  # Simplified DisplayText creation
                     yield sentence, display, actions  # Yield the tuple
