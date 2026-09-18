@@ -55,6 +55,7 @@ ENGLISH README | [中文 README](./README.CN.md) | [한국어 README](./README.K
 | **渲染修正** | `vrm_frontend/app.js` | 移除 `ACESFilmicToneMapping`、光照总量 4.4 → 2.4（MToon 卡通渲染下前者会把浅色贴图洗成白模）；另外摘掉「`normalScale` 为 0 却指向纯黑占位图」的法线贴图，否则这些材质会整体过曝 |
 | **静态资源缓存** | `src/open_llm_vtuber/server.py` | 对 `.js/.mjs/.html/.css/.vrm` 下发 `Cache-Control: no-cache`，前端与模型改动刷新即生效 |
 | **模型减面工具** | `scripts/optimize_vrm.py` | 用 gltfpack 简化网格，并把被丢弃的 VRM 扩展按骨骼索引偏移搬回，无需 Blender 即可把高模压到可实时渲染的面数 |
+| **VRM 动作制作规范** | `doc/vrm_motion_guide.md` | 归一化骨骼与 VRM 0.x/1.0 的坐标系基差、`.vrma` 与程序化两条路径、工具 API、取景/臂长/出画等几何硬约束与验收流程 |
 | **工程记录** | `doc/` | 桌宠可行性分析、无框窗口 UI 规范、踩坑与失败记录（根因 / 判据 / 教训） |
 
 各模块的架构、参数、注意事项与排错方法，分别见对应目录下的 `README.md`。

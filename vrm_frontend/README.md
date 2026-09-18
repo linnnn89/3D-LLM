@@ -55,11 +55,27 @@ Placeholder：目前 `greeting` 用的是 BOOTH 免费包里的 `VRMA_01`（全�
 
 ### 2.2 程序化动作
 
-`ensureProceduralMotionClips()` 以 `applyNaturalPose()` 之后的自然站姿为基准，用 `rotTrack()` 生成相对 rest 姿态的旋转关键帧。
+`ensureProceduralMotionClips()` 以 `applyNaturalPose()` 之后的自然站姿为基准，用 `rotTrack()` 生成旋转关键帧。
+
+**旋转一律按「世界系」语义书写**，这是为了让同一份代码在 VRM 0.x / 1.0 上得到相同的世界姿态：
+
+| 项 | VRM 1.0（由比滨结衣） | VRM 0.x（喜多郁代 / 雷电将军） |
+| --- | --- | --- |
+| `vrm.scene.rotation.y` | `0` | `π`（`VRMUtils.rotateVRM0`） |
+| 归一化 rig 根世界四元数 `P` | `(0,0,0,1)` = `I` | `(0,1,0,0)` = `Ry(π)` |
+
+归一化骨骼的局部增量 `E` 的实际世界效果是 `P · E · P⁻¹`。所以：
+
+- `rotTrack()` 收到欧拉角后先做 `E' = P⁻¹ · E · P`（`authoredEulerToLocal()`）。对 VRM 1.0 是恒等变换，既有数值逐位不变；
+  对 VRM 0.x 抵掉那 180°，避免整组动作被镜像（上臂本该下放却上举）。
+- 需要「让某骨骼指向某方向」时用 `solveBoneAim()` 反解，不要手填角度；`wave_hand` 即如此，且目标指向用**角色自身基**表达。
+
+骨骼操作工具（`rigBaseQuaternion` / `authoredEulerToLocal` / `solveBoneAim` / `characterBasis` / `basisToWorld` / `palmNormal`）
+集中在 `app.js` §2，**完整方法、几何硬约束与验收流程见 [`../doc/vrm_motion_guide.md`](../doc/vrm_motion_guide.md)**。
 
 | 动作 | 效果 |
 | --- | --- |
-| `wave_hand` | 右臂抬起 + 前臂来回摆动，配合头部轻侧 |
+| `wave_hand` | 肘部垂在肩下并略前收、前臂竖起把手举到脸侧摆动 3 次，掌心正对观众（**按目标指向运行时反解**，三模型一致） |
 | `shake_head` | 头部偏航左右摆，胸腔轻微跟随 |
 | `gentle_nod` | 头部俯仰点头 |
 | `shy_tilt` | 头部侧倾 + 低头 |
@@ -67,7 +83,15 @@ Placeholder：目前 `greeting` 用的是 BOOTH 免费包里的 `VRMA_01`（全�
 | `surprise_jump` | 髋部后缩 + 头部后仰 |
 | `pout_turn` | 头部偏航转向 |
 
-> 调整动作幅度 → 改 `rotTrack()` 调用里的欧拉角数组即可。数值是**相对自然站姿的增量弧度**（±0.2 ≈ ±11°）。
+> 调整动作幅度 → 改 `rotTrack()` 调用里的欧拉角数组即可。数值按**世界系**语义解读、单位是弧度
+> （±0.2 ≈ ±11°），函数内部会换算成当前 VRM 版本需要的局部增量。
+>
+> ⚠️ 别凭感觉改这些数字。归一化骨骼在 identity 时就是 T-pose，"把手放下来"在数值上其实是很大的旋转
+> （z 轴 ±1.22 ≈ 70°），与直觉的"抬到多少度"不一致——`wave_hand` 调错时整条手臂会退化成一根水平外伸的直杆。
+> 另外**只在单个角色上看着对不算数**：三个角色里两个是 VRM 0.x。
+> 凡是有明确空间意图的动作（"把手举到脸侧"），请用 `solveBoneAim()` **反解**而不是手调角度。
+> 完整方法、几何硬约束与验收流程见 [`../doc/vrm_motion_guide.md`](../doc/vrm_motion_guide.md)，
+> 踩过的坑见 [`../doc/pitfalls.md` §2.7 / §2.8](../doc/pitfalls.md)。
 
 ### 2.3 触发方式
 
@@ -289,6 +313,7 @@ python scripts/optimize_vrm.py 原模型.vrm -o 输出.vrm -si 0.15 -se 0.005
 | 模型是白模、无五官 | 先看 **3.4**（占位法线贴图导致的面部过曝，喜多郁代即此因：头发/衣服颜色正常、只有皮肤和眼睛发白）；再看 3.1 / 3.2（色调映射与光照强度，属全局性的整体发白） |
 | 角色头部被裁掉 / 只看见嘴和下巴 | 见 **3.5**：该模型的世界尺寸偏大。控制台看 `[VRM] 尺寸归一化` 那行，确认 `head 骨 × 缩放系数 ≈ 1.4111` |
 | 模型全黑 | 顶点法线或 UV 被改坏，见第 5 节的 `-kv` / `-noq`。另外 `app.js` 只在模型 URL **变化**时才重新加载，替换文件后要从别的角色切回该角色（或刷新页面）才会真正重载 |
+| 动作只在某个角色上正确 / 某个角色手臂上举 | 该模型是 VRM 0.x 而动作数值缺版本基差补偿，见 **2.2** 与 [pitfalls §2.8](../doc/pitfalls.md) |
 | 动作没反应 | 打开控制台看是否有 `[Motion]` 日志；确认 `currentAnimationMixer` 已建立（模型已加载完成） |
 | 动作卡住不回待机 | 检查 one-shot 的 `finished` 回调是否被新动作打断（`currentMotionFinishedHandler` 的清理逻辑） |
 | 改了文件但页面没变 | 见 [app/README.md · 3.3](../app/README.md) 缓存说明 |

@@ -177,28 +177,118 @@ function onWindowResize() {
 }
 
 // --- 2. Natural Resting Pose for VRM (No Awkward T-Pose) ---
+//
+// 本节同时放「按世界系语义操作归一化骨骼」的工具，applyNaturalPose 与程序化动作共用。
+//
+// 为什么需要它们：three-vrm 的归一化骨架里，所有骨骼静止时的局部旋转都是单位阵，但
+// **rig 根的世界朝向两个 VRM 版本并不一致** ——
+//   VRM 1.0 → 单位阵 I
+//   VRM 0.x → Ry(π)（VRMUtils.rotateVRM0 把整个 scene 绕 Y 转了 180°）
+// 所以「在父级局部系里左乘同一组欧拉角」这件事，在 0.x 上得到的**世界**旋转是被 Ry(π)
+// 共轭过的（x、z 分量取反）：上臂本该下放却上举、前臂本该竖起却下垂、点头变成后仰。
+// 写死欧拉角只对一个版本有效，根因就在这里；下面统一按世界系语义收发。
+
+/** 归一化骨架的基准世界四元数（骨骼静止时，任意骨骼的父级朝向都等于 rig 根朝向）。 */
+function rigBaseQuaternion(vrm) {
+  vrm.scene.updateMatrixWorld(true);
+  return vrm.humanoid.normalizedHumanBonesRoot.getWorldQuaternion(new THREE.Quaternion());
+}
+
+/**
+ * 把「按 VRM 1.0 手调的局部欧拉角」换算成当前模型的局部旋转（P⁻¹ · E · P）。
+ * 对 VRM 1.0 是恒等变换（P = I），既有数值逐位不变；对 VRM 0.x 把 180° 的基差抵掉。
+ */
+function authoredEulerToLocal(baseQuat, euler) {
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(euler[0], euler[1], euler[2]));
+  return baseQuat.clone().invert().multiply(q).multiply(baseQuat);
+}
+
+/**
+ * 反解「让 node 指向 targetWorldDir」所需的局部旋转增量。
+ *
+ * 关键帧写进轨道的是局部增量 Δ（播放时骨骼旋转 = Δ · restQuat），其世界效果是 Δ 被父级
+ * 世界四元数共轭：世界增量 = P · Δ · P⁻¹。取 Δ = P⁻¹ · R · P（R = setFromUnitVectors(当前指向, 目标)）
+ * 即可让世界增量恒为 R，与模型版本无关。
+ *
+ * 调用前必须 updateMatrixWorld(true)：P 与「当前指向」都是实时读的，而子骨骼的解依赖父骨骼
+ * 已摆好的姿态，所以求解顺序必须是 上臂 → 刷新矩阵 → 前臂 → 手腕。
+ */
+function solveBoneAim(node, child, targetWorldDir) {
+  const parentWorld = node.parent.getWorldQuaternion(new THREE.Quaternion());
+  const currentDir = new THREE.Vector3()
+    .subVectors(child.getWorldPosition(new THREE.Vector3()), node.getWorldPosition(new THREE.Vector3()))
+    .normalize();
+  const worldDelta = new THREE.Quaternion().setFromUnitVectors(
+    currentDir,
+    targetWorldDir.clone().normalize()
+  );
+  return parentWorld.clone().invert().multiply(worldDelta).multiply(parentWorld);
+}
+
+/**
+ * 角色自身基：右 = 右肩−左肩，上 = +Y，前 = 上×右（指向观众）。
+ * 用基系数表达目标指向，就不必去猜某个版本的骨骼局部系朝哪边。
+ */
+function characterBasis(vrm) {
+  const left = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+  const right = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+  if (!left || !right) return null;
+  vrm.scene.updateMatrixWorld(true);
+  const rightAxis = new THREE.Vector3()
+    .subVectors(right.getWorldPosition(new THREE.Vector3()), left.getWorldPosition(new THREE.Vector3()))
+    .normalize();
+  const upAxis = new THREE.Vector3(0, 1, 0);
+  return {
+    right: rightAxis,
+    up: upAxis,
+    forward: new THREE.Vector3().crossVectors(upAxis, rightAxis).normalize()
+  };
+}
+
+function basisToWorld(basis, a, b, c) {
+  return new THREE.Vector3()
+    .addScaledVector(basis.right, a)
+    .addScaledVector(basis.up, b)
+    .addScaledVector(basis.forward, c)
+    .normalize();
+}
+
+/**
+ * 掌心朝向 = cross(拇指方向, 手指方向)。
+ * 已用 T-pose 核对符号约定：VRM 约定 T-pose 掌心朝下，本式给出 ≈(0,-1,0)，即该法线是
+ * 「掌心朝向」而不是手背朝向。
+ */
+function palmNormal(vrm, side = 'right') {
+  const h = vrm.humanoid;
+  const hand = h.getNormalizedBoneNode(`${side}Hand`);
+  const finger = h.getNormalizedBoneNode(`${side}MiddleProximal`);
+  const thumb = h.getNormalizedBoneNode(`${side}ThumbProximal`);
+  if (!hand || !finger || !thumb) return null;
+  const origin = hand.getWorldPosition(new THREE.Vector3());
+  const fingerDir = finger.getWorldPosition(new THREE.Vector3()).sub(origin).normalize();
+  const thumbDir = thumb.getWorldPosition(new THREE.Vector3()).sub(origin).normalize();
+  return new THREE.Vector3().crossVectors(thumbDir, fingerDir).normalize();
+}
+
 function applyNaturalPose(vrm) {
   if (!vrm || !vrm.humanoid) return;
 
   // Lower arms naturally to sides (~70 degrees down from T-pose)
-  const leftUpperArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
-  if (leftUpperArm) {
-    leftUpperArm.rotation.set(0.08, 0, -1.22);
-  }
-  const rightUpperArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-  if (rightUpperArm) {
-    rightUpperArm.rotation.set(0.08, 0, 1.22);
-  }
-
   // Slightly bend elbows for a relaxed cute anime girl stance
-  const leftLowerArm = vrm.humanoid.getNormalizedBoneNode('leftLowerArm');
-  if (leftLowerArm) {
-    leftLowerArm.rotation.set(-0.25, 0.15, -0.18);
+  // 数值沿用此前在由比滨结衣（VRM 1.0）上调好的那组，只改成按世界系语义施加，
+  // 这样 VRM 0.x（喜多郁代 / 雷电将军）不会再镜像成「双手上举」。
+  const base = rigBaseQuaternion(vrm);
+  const NATURAL_ARM_ROTATIONS = [
+    ['leftUpperArm', [0.08, 0, -1.22]],
+    ['rightUpperArm', [0.08, 0, 1.22]],
+    ['leftLowerArm', [-0.25, 0.15, -0.18]],
+    ['rightLowerArm', [-0.25, -0.15, 0.18]]
+  ];
+  for (const [name, euler] of NATURAL_ARM_ROTATIONS) {
+    const node = vrm.humanoid.getNormalizedBoneNode(name);
+    if (node) node.quaternion.copy(authoredEulerToLocal(base, euler));
   }
-  const rightLowerArm = vrm.humanoid.getNormalizedBoneNode('rightLowerArm');
-  if (rightLowerArm) {
-    rightLowerArm.rotation.set(-0.25, -0.15, 0.18);
-  }
+  vrm.scene.updateMatrixWorld(true);
 }
 
 // --- 3. Load VRM Model ---
@@ -835,16 +925,28 @@ function ensureProceduralMotionClips(vrm) {
   const chestNode = h.getNormalizedBoneNode('chest');
   const hipsNode = h.getNormalizedBoneNode('hips');
 
-  // 以当前 rest 姿态 (applyNaturalPose 之后的自然站姿) 为基准生成旋转关键帧轨道
-  const rotTrack = (node, times, eulers) => {
-    const qRest = node.quaternion.clone();
+  const base = rigBaseQuaternion(vrm);
+  const IDENTITY_QUAT = new THREE.Quaternion();
+
+  // 底层：把一组**局部增量**四元数写成以 restQuat 为基准的旋转关键帧轨道
+  const quatTrack = (node, restQuat, times, quats) => {
     const values = [];
-    for (const [x, y, z] of eulers) {
-      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z)).multiply(qRest);
-      values.push(...q.toArray());
+    for (const q of quats) {
+      values.push(...q.clone().multiply(restQuat).toArray());
     }
     return new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, times, values);
   };
+
+  // 以当前 rest 姿态 (applyNaturalPose 之后的自然站姿) 为基准生成旋转关键帧轨道。
+  // 传入的欧拉角按**世界系**语义解释：先用本节开头的基准把 VRM 0.x/1.0 的基差抵掉，
+  // 于是同一组手调数值在两个版本上得到相同的世界旋转（对 VRM 1.0 是恒等变换）。
+  const rotTrack = (node, times, worldEulers) =>
+    quatTrack(
+      node,
+      node.quaternion.clone(),
+      times,
+      worldEulers.map((euler) => authoredEulerToLocal(base, euler))
+    );
 
   // 1. cheerful_bounce (欢快跳跃/雀跃)
   if (!activeMotionClips['cheerful_bounce'] && hipsNode) {
@@ -930,32 +1032,91 @@ function ensureProceduralMotionClips(vrm) {
   }
 
   // 5. wave_hand (轻柔摆手 / 招手问候)
-  // 数值由骨骼反解实测：上臂侧伸、肘部弯约 104°、前臂竖起，手停在脸侧（约眼睛高度）
-  // 随前臂左右摆约 ±16°。两处踩过的坑：
+  //
+  // 这里不用写死的欧拉角，而是按「期望的骨骼世界指向」运行时反解（原因见 §2 开头）。
+  // 目标指向用**角色自身基**表达，于是三份模型共用同一组「意图」：
+  //   上臂 下放到肩下 + 略前收；前臂竖直竖起并使肘部保持约 133° 的弯；
+  //   前臂绕 forward 轴左右摆 ±16°，把手举到脸侧（指尖约额头高度）；
+  //   手腕单独反解，让掌心正对观众。
+  // 三处踩过的坑：
   //   ① 只抬上臂而不给前臂足够的肘弯，整条手臂会退化成一根水平外伸的直杆；
-  //   ② 抬得过高时手指会顶出画面（垂直取景是固定的），故按指尖(而非手腕骨)定高度。
+  //   ② 肘部抬到肩高并向外伸，看起来是「停下」而不是「打招呼」，要下放+前收；
+  //   ③ 不驱动 rightHand 的话掌心朝向会继承 T-pose（朝下），手背/侧面对人。
+  // 反解顺序必须是 上臂 → 刷新矩阵 → 前臂 → 手腕：子骨骼的解依赖父骨骼已摆好的姿态；
+  // 且每解一个键前先把该骨骼复位，否则上一次的姿态会污染这一次的「当前指向」。
   if (!activeMotionClips['wave_hand']) {
     const rUpperArm = h.getNormalizedBoneNode('rightUpperArm');
     const rLowerArm = h.getNormalizedBoneNode('rightLowerArm');
-    if (rUpperArm && rLowerArm) {
-      const RAISED = [0.005, 0.126, -1.132];     // 上臂抬起并保持
-      const SWING_MID = [0.086, -0.150, -2.012]; // 前臂竖直居中
-      const SWING_OUT = [0.108, -0.107, -1.733]; // 前臂摆向外侧
-      const SWING_IN = [0.050, -0.186, -2.292];  // 前臂摆向内侧
+    const rHand = h.getNormalizedBoneNode('rightHand');
+    const basis = characterBasis(vrm);
+    if (rUpperArm && rLowerArm && rHand && basis) {
+      const UPPER_TARGET = basisToWorld(basis, 0.76, -0.48, 0.44); // 下放 + 前收
+      const FORE_TARGET = basisToWorld(basis, -0.22, 0.96, -0.13); // 竖起 + 略朝脸侧收
+      const SWING_DEG = 16; // 前臂摆幅（绕 forward 轴）
+      const VIEWER_DIR = new THREE.Vector3(0, 0, 1);
+
+      // 反解基准是自然站姿，解出的增量要配这组 rest 使用
+      applyNaturalPose(vrm);
+      const qUpRest = rUpperArm.quaternion.clone();
+      const qLowRest = rLowerArm.quaternion.clone();
+      const qHandRest = rHand.quaternion.clone();
+
+      // 上臂：解出来就真的施加，前臂的解依赖已经抬起的父骨骼
+      const dUp = solveBoneAim(rUpperArm, rLowerArm, UPPER_TARGET);
+      rUpperArm.quaternion.copy(qUpRest).premultiply(dUp);
+      vrm.scene.updateMatrixWorld(true);
+
+      // 前臂：中位 + 绕 forward 轴 ±SWING_DEG 的两个端点
+      const foreDelta = (swingDeg) => {
+        rLowerArm.quaternion.copy(qLowRest);
+        vrm.scene.updateMatrixWorld(true);
+        const target = FORE_TARGET.clone().applyQuaternion(
+          new THREE.Quaternion().setFromAxisAngle(basis.forward, THREE.MathUtils.degToRad(swingDeg))
+        );
+        return solveBoneAim(rLowerArm, rHand, target);
+      };
+      const dSwingIn = foreDelta(-SWING_DEG);
+      const dSwingMid = foreDelta(0);
+      const dSwingOut = foreDelta(SWING_DEG);
+
+      // 手腕：先把前臂摆到中位，再把掌心法线转到观众方向
+      rLowerArm.quaternion.copy(qLowRest).premultiply(dSwingMid);
+      vrm.scene.updateMatrixWorld(true);
+      const palm = palmNormal(vrm, 'right');
+      const handParentWorld = rHand.parent.getWorldQuaternion(new THREE.Quaternion());
+      const dHand = handParentWorld
+        .clone()
+        .invert()
+        .multiply(
+          palm ? new THREE.Quaternion().setFromUnitVectors(palm, VIEWER_DIR) : new THREE.Quaternion()
+        )
+        .multiply(handParentWorld);
+
+      // 复位，别把反解过程中的姿态带进后面几个 clip 的 qRest
+      rUpperArm.quaternion.copy(qUpRest);
+      rLowerArm.quaternion.copy(qLowRest);
+      rHand.quaternion.copy(qHandRest);
+      vrm.scene.updateMatrixWorld(true);
+
       const tracks = [
         // 抬臂 → 保持 → 回落
-        rotTrack(rUpperArm, [0.0, 0.35, 2.45, 2.7], [
-          [0, 0, 0], RAISED, RAISED, [0, 0, 0]
+        quatTrack(rUpperArm, qUpRest, [0.0, 0.35, 2.45, 2.7], [
+          IDENTITY_QUAT, dUp, dUp, IDENTITY_QUAT
         ]),
         // 前臂来回摆动 3 次 (0.6s 一个来回)
-        rotTrack(
+        quatTrack(
           rLowerArm,
+          qLowRest,
           [0.0, 0.35, 0.65, 0.95, 1.25, 1.55, 1.85, 2.15, 2.45, 2.7],
           [
-            [0, 0, 0], SWING_MID, SWING_OUT, SWING_IN, SWING_OUT,
-            SWING_IN, SWING_OUT, SWING_IN, SWING_MID, [0, 0, 0]
+            IDENTITY_QUAT, dSwingMid, dSwingOut, dSwingIn, dSwingOut,
+            dSwingIn, dSwingOut, dSwingIn, dSwingMid, IDENTITY_QUAT
           ]
-        )
+        ),
+        // 手腕滚转：掌心朝向观众
+        quatTrack(rHand, qHandRest, [0.0, 0.35, 2.45, 2.7], [
+          IDENTITY_QUAT, dHand, dHand, IDENTITY_QUAT
+        ])
       ];
       if (headNode) {
         tracks.push(rotTrack(headNode, [0.0, 0.45, 2.45, 2.7], [
