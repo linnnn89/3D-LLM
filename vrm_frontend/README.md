@@ -17,6 +17,7 @@
 | `character.html` | **角色设置窗口**（人设 / 声音 / 3D 形象） |
 | `settings.js` | 两个设置窗口共用的逻辑（按 `body[data-settings-page]` 区分模式） |
 | `libs/` | 本地化的 three.js、three-vrm、three-vrm-animation、GLTFLoader、OrbitControls |
+| `utils/` | `GLTFLoader` 依赖的 `BufferGeometryUtils.js` / `SkeletonUtils.js`（**位置由相对 import 决定，不能挪进 `libs/`**） |
 | `motions/` | `.vrma` 动作文件（缺失时自动降级为程序化动作） |
 
 依赖通过 `index.html` 里的 importmap 解析，全部指向 `libs/` 本地文件，**不依赖 CDN**：
@@ -27,6 +28,41 @@
 "@pixiv/three-vrm": "./libs/three-vrm.module.min.js",
 "@pixiv/three-vrm-animation": "./libs/three-vrm-animation.module.min.js"
 ```
+
+### 1.1 vendored 依赖的版本与摆放规则（three r184）
+
+当前 three 版本：**r184**（`libs/three.module.js` 头部 `REVISION`）。
+
+**摆放规则：文件放在「它内部相对 import 能解析到」的位置。** importmap 只能改写**裸说明符**（`three`、`three/addons/…`），
+`./`、`../` 开头的相对说明符会直接按 URL 解析、**绕过 importmap**。所以 `libs/GLTFLoader.js` 里那句
+`import { toTrianglesDrawMode } from '../utils/BufferGeometryUtils.js'` 是相对**站点根**解析的，
+依赖文件必须放在 `vrm_frontend/utils/`，**不是** `vrm_frontend/libs/utils/`。
+
+| 文件 | 谁需要它 | 备注 |
+| --- | --- | --- |
+| `libs/three.module.js` | 所有模块 | r184 起它**只负责 WebGL 部分**，内部 `import … from './three.core.js'` |
+| `libs/three.core.js` | 同上 | **r184 新增**，必须与 `three.module.js` 同目录，否则整个 three 加载失败 |
+| `libs/GLTFLoader.js` | `app.js` | r184 起**额外**依赖 `../utils/SkeletonUtils.js`（r169 不需要） |
+| `libs/OrbitControls.js` | `app.js` | 仅依赖 `three` |
+| `utils/BufferGeometryUtils.js` | `GLTFLoader` | 仅依赖 `three` |
+| `utils/SkeletonUtils.js` | `GLTFLoader` | **r184 新增**，仅依赖 `three` |
+| `libs/three-vrm.module.min.js` | `app.js` | 未随 three 升级一并变更，已验证与 r184 兼容 |
+| `libs/three-vrm-animation.module.min.js` | `app.js` | 同上 |
+
+**升级 three 的完整步骤**（本次升级就是这样做的）：
+
+1. 从 npm 包 `three@<版本>` 取 `build/three.module.js`、`build/three.core.js`、`examples/jsm/loaders/GLTFLoader.js`、
+   `examples/jsm/controls/OrbitControls.js`、`examples/jsm/utils/BufferGeometryUtils.js`、`examples/jsm/utils/SkeletonUtils.js`；
+2. 前四个放 `libs/`，后两个放 `utils/`（**不要改文件内容**）；
+3. 检查新版本是否又引入了新的相对 import（在文件里搜 `from '../`），补上对应文件；
+4. 刷新页面看控制台有无 404 与模块解析错误，并确认模型正常显示、`[VRM] 尺寸归一化` 日志出现。
+
+**已知遗留**：`app.js` 仍用 `new THREE.Clock()`，r184 起控制台会打印
+`THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.`
+——**这是弃用提示，不是错误，功能正常**。迁移到 `THREE.Timer` 属待办。
+
+> 完整升级记录（升级前后对照数据、体积变化、回退方式）见
+> [`../doc/vrm_pmx_dual_rendering_architecture_plan.md` 附录 C](../doc/vrm_pmx_dual_rendering_architecture_plan.md)。
 
 ---
 
@@ -316,4 +352,6 @@ python scripts/optimize_vrm.py 原模型.vrm -o 输出.vrm -si 0.15 -se 0.005
 | 动作只在某个角色上正确 / 某个角色手臂上举 | 该模型是 VRM 0.x 而动作数值缺版本基差补偿，见 **2.2** 与 [pitfalls §2.8](../doc/pitfalls.md) |
 | 动作没反应 | 打开控制台看是否有 `[Motion]` 日志；确认 `currentAnimationMixer` 已建立（模型已加载完成） |
 | 动作卡住不回待机 | 检查 one-shot 的 `finished` 回调是否被新动作打断（`currentMotionFinishedHandler` 的清理逻辑） |
+| 控制台出现 `THREE.Clock: This module has been deprecated…` | **正常，不是故障**。three r184 起弃用 `Clock`，功能仍可用，迁移属待办。见 **1.1** |
+| three 相关模块 404 / 页面白屏 | 检查 `libs/three.core.js` 与 `utils/SkeletonUtils.js` 是否存在（r184 新增的两个文件），见 **1.1** |
 | 改了文件但页面没变 | 见 [app/README.md · 3.3](../app/README.md) 缓存说明 |

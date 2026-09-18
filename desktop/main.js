@@ -120,8 +120,9 @@ let chatCollapsed = false
 // 角色清单从角色窗口的 #config-select 读（见 refreshCharacterList），
 // 当前角色则以后端推来的 set-model-and-conf 为准（页面加载那一刻 select 的默认选中项
 // 是列表第一项，并不等于真正加载的角色，不能拿它当当前值）。
-let characterOptions = [] // [{ value, label }]
+let characterOptions = [] // [{ value, id, label }]
 let currentCharacterName = ''
+let currentCharacterId = ''
 
 // ---------------------------------------------------------------- 日志
 
@@ -685,7 +686,11 @@ async function refreshCharacterList() {
     const options = await avatarWindow.webContents.executeJavaScript(`(() => {
       const sel = document.getElementById('config-select')
       if (!sel) return null
-      return Array.from(sel.options).map((o) => ({ value: o.value, label: o.textContent.trim() }))
+      return Array.from(sel.options).map((o) => ({
+        value: o.value,
+        id: o.getAttribute('data-id') || o.value.replace(/\\.ya?ml$/i, ''),
+        label: o.textContent.trim()
+      }))
     })()`)
     if (!Array.isArray(options) || !options.length) return
     characterOptions = options
@@ -711,8 +716,12 @@ function switchCharacter(file) {
   avatarWindow.webContents.send('avatar:ws-send', JSON.stringify({ type: 'switch-config', file }))
 }
 
-/** 角色清单里的一项是否就是当前角色（`conf_name` 是"喜多郁代"，选项值是"zh_喜多郁代.yaml"） */
-function isCurrentCharacter(value, label) {
+/** 角色清单里的一项是否就是当前角色（根据身份证 ID 精准判定） */
+function isCurrentCharacter(value, label, id) {
+  const targetId = id || (typeof value === 'string' ? value.replace(/\.ya?ml$/i, '') : '')
+  if (currentCharacterId && targetId) {
+    return targetId === currentCharacterId
+  }
   if (!currentCharacterName) return false
   return String(value).includes(currentCharacterName) || String(label || '').includes(currentCharacterName)
 }
@@ -766,7 +775,7 @@ function refreshTrayMenu() {
           ? characterOptions.map((option) => ({
               label: option.label,
               type: 'radio',
-              checked: isCurrentCharacter(option.value, option.label),
+              checked: isCurrentCharacter(option.value, option.label, option.id),
               click: () => switchCharacter(option.value)
             }))
           : [{ label: '角色清单载入中…', enabled: false }]
@@ -1023,9 +1032,18 @@ function handleAvatarWsIn(raw) {
       // 当前角色的唯一权威来源。页面加载那一刻 #config-select 的选中项是列表第一项，
       // 并不等于真正加载的角色，所以托盘不能拿它当"当前角色"。
       const name = typeof data.conf_name === 'string' ? data.conf_name.trim() : ''
+      const id = typeof data.conf_uid === 'string' ? data.conf_uid.trim() : (typeof data.character_id === 'string' ? data.character_id.trim() : '')
+      let changed = false
       if (name && name !== currentCharacterName) {
         currentCharacterName = name
-        log(`[char] 当前角色: ${name}`)
+        changed = true
+      }
+      if (id && id !== currentCharacterId) {
+        currentCharacterId = id
+        changed = true
+      }
+      if (changed) {
+        log(`[char] 当前角色: ${name || id} (ID: ${currentCharacterId || '未知'})`)
         refreshTrayMenu()
       }
       break

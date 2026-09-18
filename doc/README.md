@@ -4,6 +4,7 @@ For full documentation, please visit our [documentation site](https://open-llm-v
 > The `sample_conf` directory contains legacy sample configuration files for running various models with sherpa-onnx. These files are deprecated and will be removed after we extract the relevant sherpa-onnx information.
 
 ## 规划文档 / Roadmaps
+- [VRM 与 PMX (MMD) 双轨原生渲染架构改造计划书](vrm_pmx_dual_rendering_architecture_plan.md) —— 渲染、显示、主动交互与对话情绪动作系统双轨改造设计与落地路线图
 - [肢体与全身动作联动待升级规划](motion_upgrade_roadmap.md) —— 动作系统各阶段的现状与剩余待办
 
 ## 3D / VRM 动作

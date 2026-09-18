@@ -537,6 +537,30 @@ class ServiceContext:
         try:
             new_character_config_data = None
 
+            # 兼容旧版本中日文文件名向身份证 ID 的平滑重定向表
+            LEGACY_NAME_ALIASES = {
+                "zh_喜多郁代.yaml": "zh_kita_ikuyo_01.yaml",
+                "喜多郁代": "zh_kita_ikuyo_01.yaml",
+                "zh_由比滨结衣.yaml": "zh_yuigahama_yui_01.yaml",
+                "由比滨结衣": "zh_yuigahama_yui_01.yaml",
+                "zh_雷电将军.yaml": "zh_raiden_shogun_01.yaml",
+                "雷电将军": "zh_raiden_shogun_01.yaml",
+                "zh_托尔.yaml": "zh_tohru_01.yaml",
+                "托尔": "zh_tohru_01.yaml",
+                "zh_时崎狂三.yaml": "zh_tokisaki_kurumi_01.yaml",
+                "时崎狂三": "zh_tokisaki_kurumi_01.yaml",
+                "zh_坎特蕾拉.yaml": "zh_cantarella_01.yaml",
+                "坎特蕾拉": "zh_cantarella_01.yaml",
+                "zh_弗洛洛.yaml": "zh_phrolova_01.yaml",
+                "弗洛洛": "zh_phrolova_01.yaml",
+            }
+            if config_file_name in LEGACY_NAME_ALIASES:
+                config_file_name = LEGACY_NAME_ALIASES[config_file_name]
+
+            # 若直接传入身份证ID（如 zh_yuigahama_yui_01），自动补齐扩展名
+            if not config_file_name.endswith(".yaml") and not config_file_name.endswith(".yml"):
+                config_file_name = f"{config_file_name}.yaml"
+
             if config_file_name == "conf.yaml":
                 # Load base config
                 new_character_config_data = read_yaml("conf.yaml").get(
@@ -617,6 +641,7 @@ class ServiceContext:
                             "model_info": self.live2d_model.model_info,
                             "conf_name": self.character_config.conf_name,
                             "conf_uid": self.character_config.conf_uid,
+                            "character_id": self.character_config.conf_uid,
                         }
                     )
                 )

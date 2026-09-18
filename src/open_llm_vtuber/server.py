@@ -44,7 +44,7 @@ class CORSStaticFiles(StarletteStaticFiles):
         # 未设置 Cache-Control 时浏览器会按 Last-Modified 做启发式缓存，
         # 导致修改 vrm_frontend/ 或替换 vrm-models/ 里的模型后，套壳视口仍然加载旧文件。
         # no-cache 表示"可缓存但每次必须校验"，文件未变时走 304，文件变更时立刻生效。
-        if path.endswith((".js", ".mjs", ".html", ".css", ".vrm")):
+        if path.endswith((".js", ".mjs", ".html", ".css", ".vrm", ".pmx", ".pmd", ".vmd", ".tga", ".bmp", ".wasm")):
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
 
         return response
@@ -154,6 +154,24 @@ class WebSocketServer:
             "/vrm-models",
             CORSStaticFiles(directory="vrm-models"),
             name="vrm-models",
+        )
+
+        # Mount PMX models directory
+        if not os.path.exists("pmx-models"):
+            os.makedirs("pmx-models")
+        self.app.mount(
+            "/pmx-models",
+            CORSStaticFiles(directory="pmx-models"),
+            name="pmx-models",
+        )
+
+        # Mount PMX / Blend motion system directory
+        if not os.path.exists("pmx_motion"):
+            os.makedirs("pmx_motion")
+        self.app.mount(
+            "/pmx_motion",
+            CORSStaticFiles(directory="pmx_motion"),
+            name="pmx_motion",
         )
 
         # Mount 3D VRM frontend

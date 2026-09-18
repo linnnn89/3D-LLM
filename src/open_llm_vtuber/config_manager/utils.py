@@ -127,13 +127,14 @@ def save_config(config: BaseModel, config_path: Union[str, Path]):
 def scan_config_alts_directory(config_alts_dir: str) -> list[dict]:
     """
     Scan the config_alts directory and return a list of config information.
-    Each config info contains the filename and its display name from the config.
+    Each config info contains the character ID (conf_uid), filename, and display name.
 
     Parameters:
     - config_alts_dir (str): The path to the config_alts directory.
 
     Returns:
     - list[dict]: A list of dicts containing config info:
+        - id: The character's alphanumeric identity ID (conf_uid)
         - filename: The actual config file name
         - name: Display name from config, falls back to filename if not specified
     """
@@ -141,14 +142,12 @@ def scan_config_alts_directory(config_alts_dir: str) -> list[dict]:
 
     # Add default config first
     default_config = read_yaml("conf.yaml")
+    def_char = default_config.get("character_config", {}) if default_config else {}
     config_files.append(
         {
+            "id": def_char.get("conf_uid", "mao_pro_001"),
             "filename": "conf.yaml",
-            "name": default_config.get("character_config", {}).get(
-                "conf_name", "conf.yaml"
-            )
-            if default_config
-            else "conf.yaml",
+            "name": def_char.get("conf_name", "conf.yaml"),
         }
     )
 
@@ -162,14 +161,13 @@ def scan_config_alts_directory(config_alts_dir: str) -> list[dict]:
             if not entry.is_file() or not entry.name.endswith(".yaml"):
                 continue
             config: dict = read_yaml(entry.path)
+            char_cfg = config.get("character_config", {}) if config else {}
+            char_id = char_cfg.get("conf_uid") or os.path.splitext(entry.name)[0]
             config_files.append(
                 {
+                    "id": char_id,
                     "filename": entry.name,
-                    "name": config.get("character_config", {}).get(
-                        "conf_name", entry.name
-                    )
-                    if config
-                    else entry.name,
+                    "name": char_cfg.get("conf_name", entry.name),
                 }
             )
     logger.debug(f"Found config files: {config_files}")

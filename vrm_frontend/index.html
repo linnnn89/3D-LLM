@@ -12,7 +12,11 @@
       "three": "./libs/three.module.js",
       "three/addons/": "./libs/",
       "@pixiv/three-vrm": "./libs/three-vrm.module.min.js",
-      "@pixiv/three-vrm-animation": "./libs/three-vrm-animation.module.min.js"
+      "@pixiv/three-vrm-animation": "./libs/three-vrm-animation.module.min.js",
+      "@moeru/three-mmd": "./libs/three-mmd/index.js",
+      "@moeru/three-mmd/materials": "./libs/three-mmd/materials/index.js",
+      "@moeru/three-mmd/materials/physical": "./libs/three-mmd/materials/physical.js",
+      "@moeru/three-mmd/materials/toon": "./libs/three-mmd/materials/toon.js"
     }
   }
   </script>
@@ -53,9 +57,13 @@
           <span>👤 角色设置</span>
         </button>
         <select id="config-select" class="btn-icon" title="切换角色配置">
-          <option value="zh_喜多郁代.yaml">喜多郁代 (Kira)</option>
-          <option value="zh_由比滨结衣.yaml">由比滨结衣</option>
-          <option value="zh_雷电将军.yaml">雷电将军</option>
+          <option value="zh_kita_ikuyo_01.yaml" data-id="zh_kita_ikuyo_01">喜多郁代 (Kira)</option>
+          <option value="zh_yuigahama_yui_01.yaml" data-id="zh_yuigahama_yui_01">由比滨结衣</option>
+          <option value="zh_raiden_shogun_01.yaml" data-id="zh_raiden_shogun_01">雷电将军</option>
+          <option value="zh_tohru_01.yaml" data-id="zh_tohru_01">托尔 (PMX)</option>
+          <option value="zh_tokisaki_kurumi_01.yaml" data-id="zh_tokisaki_kurumi_01">时崎狂三</option>
+          <option value="zh_cantarella_01.yaml" data-id="zh_cantarella_01">坎特蕾拉</option>
+          <option value="zh_phrolova_01.yaml" data-id="zh_phrolova_01">弗洛洛 (フローヴァ)</option>
         </select>
         <select id="motion-select" class="btn-icon" title="肢体动作打样演示">
           <option value="">🎭 动作演示打样...</option>
