@@ -49,7 +49,11 @@ gltfpack 在简化时**保持了骨骼节点的相对顺序**，只是在节点�
 * **必须传 `-kv`**。gltfpack 默认按"材质用不用得上"裁剪顶点属性，而 MToon 的法线贴图记在
   VRM 扩展里，它看不懂，于是把 `NORMAL` 整列删掉——材质却还挂着 `normalTexture`，
   渲染时法线取 (0,0,0)，模型**整个变黑**。`TEXCOORD_1` 也会被同样处理。
-* 输出会带 `KHR_mesh_quantization`（顶点量化为整数），three.js 原生支持。
+* **必须传 `-noq`（禁用量化）**。量化会把 UV 压进 `[0, 1/15]` 这样的窄区间，再在材质上写
+  `KHR_texture_transform` 补偿；但 three-vrm 给 VRM 0.x 绑 MToon 贴图时不读这个补偿
+  （所有 `*UvTransform` 保持单位矩阵），于是所有贴图都去采样纹理左上角的极小区域，
+  **同样是整个模型变黑**。量化同时也把顶点属性变成整数并给节点加 scale，弊大于利：
+  本工具的目标是减少三角面（GPU 顶点处理量），保留浮点属性即可。
 * **务必先备份原模型**，并在浏览器里确认外观与表情正常后再替换。静态自检通过不等于能加载。
 """
 
@@ -116,6 +120,30 @@ def attribute_coverage(gl):
     return counts, prims
 
 
+# 只有这些属性的编码会改变外观。JOINTS_0 / WEIGHTS_0 被编成字节或归一化字节是 glTF 核心
+# 允许的正常优化，不参与判断，否则会产生误报。
+APPEARANCE_ATTRS = ("POSITION", "NORMAL", "TANGENT", "TEXCOORD_0", "TEXCOORD_1",
+                    "TEXCOORD_2", "COLOR_0")
+
+
+def attribute_encoding(gl):
+    """统计每种外观属性出现的 (componentType, normalized) 组合。
+
+    量化会把 float 属性变成整数并调整 normalized，同时改写 UV 数值范围——这正是
+    "模型全黑"的第二种成因（three-vrm 不读量化附带的 KHR_texture_transform 补偿）。
+    对比前后该组合即可发现是否发生了量化。
+    """
+    enc = {}
+    for m in gl.get("meshes", []):
+        for p in m.get("primitives", []):
+            for k, ai in p.get("attributes", {}).items():
+                if k not in APPEARANCE_ATTRS:
+                    continue
+                a = gl["accessors"][ai]
+                enc.setdefault(k, set()).add((a["componentType"], bool(a.get("normalized"))))
+    return {k: sorted(v) for k, v in enc.items()}
+
+
 # --------------------------------------------------------------------------- gltfpack
 def run_gltfpack(src, dst, ratio, error):
     """调用 gltfpack（经 npx）。gltfpack 按扩展名判断格式，故输入需为 .glb。"""
@@ -129,7 +157,8 @@ def run_gltfpack(src, dst, ratio, error):
            "-kn",   # 保留命名节点：VRM 骨架依赖它
            "-km",   # 保留命名材质，禁止合并（VRM 材质按名字匹配）
            "-ke",   # 保留 extras
-           "-kv"]   # 保留"看似没被使用"的顶点属性：MToon 的 NORMAL / TEXCOORD_1 全靠它
+           "-kv",   # 保留"看似没被使用"的顶点属性：MToon 的 NORMAL / TEXCOORD_1 全靠它
+           "-noq"]  # 禁用量化：量化会改写 UV 并靠 KHR_texture_transform 补偿，而 three-vrm 不读
     print(f"[gltfpack] {' '.join(cmd[2:])}")
     r = subprocess.run(cmd, capture_output=True, text=True, shell=False)
     if r.returncode != 0 or not os.path.exists(dst):
@@ -365,6 +394,18 @@ def main():
     else:
         print(f"[校验] 顶点属性完整（{n_prim} primitives）："
               + "  ".join(f"{k}={out_attrs.get(k, 0)}" for k in sorted(src_attrs)))
+
+    # 属性编码对比：一旦发生量化，UV 会被压缩并依赖 KHR_texture_transform，three-vrm 不读该补偿
+    src_enc = attribute_encoding(src_gl)
+    out_enc = attribute_encoding(out_gl)
+    changed = {k: (src_enc[k], out_enc.get(k)) for k in src_enc if out_enc.get(k) != src_enc[k]}
+    gained_quant = "KHR_mesh_quantization" in (out_gl.get("extensionsUsed") or [])
+    if changed or gained_quant:
+        print(f"[校验] !! 顶点属性编码被改动（说明发生了量化，UV 会错位）：{changed}"
+              f"  KHR_mesh_quantization={gained_quant}")
+        bad += 1
+    else:
+        print("[校验] 顶点属性编码未改变（未发生量化，UV 保持原值）")
 
     groups = (out_gl["extensions"]["VRM"].get("blendShapeMaster") or {}).get("blendShapeGroups") or []
     n_tex = len(out_gl.get("textures", []))

@@ -131,12 +131,12 @@ MToon 的明暗是两个阶跃档位。光照过强（此前总量 **4.4**）会
 | 喜多郁代 (Kira) | `vrm-models/喜多郁代/喜多郁代.vrm` | 8.5 MB | VRM 0.x，4.1 万顶点 / 6.9 万面 | 正常 |
 | 由比滨结衣 | `vrm-models/由比滨结衣/由比滨结衣.vrm` | 15 MB | VRM 1.0，14.9 万顶点 / 4.8 万面 | 正常 |
 | 雷电将军 | `vrm-models/雷电将军/雷电将军.vrm` | 12.5 MB | VRM 0.x | 正常 |
-| 依蕾娜 | `vrm-models/依蕾娜/依蕾娜.vrm` | 8.5 MB | VRM 0.x，9.3 万顶点 / **15.8 万面** | 已减面优化（原为 56 MB / 105 万面） |
+| 依蕾娜 | `vrm-models/依蕾娜/依蕾娜.vrm` | 11.6 MB | VRM 0.x，9.6 万顶点 / **16.4 万面** | 已减面优化（原为 56 MB / 106 万顶点 / 105 万面） |
 
 ### 模型相关注意事项
 
 - **喜多（VRM 0.x）**：贴图全部内嵌（10 张），无外部依赖。原始骨骼为 Blender 命名风格（`hips`/`upper_arm.R`）。此前"白模、没有五官"是 3.1/3.2 的渲染设置所致，**模型本身没有问题**。
-- **依蕾娜**：原本是未优化的高模（106 万顶点 / 105 万面，是其他模型的 20 倍以上，56 MB 中约 50 MB 是几何数据），GPU 每帧要处理的顶点数据高达 71 MB，因而显著掉帧。**已用 [`scripts/optimize_vrm.py`](../scripts/optimize_vrm.py) 减面到 15.8 万面**，原模型备份在 `temp/eileen_original_backup.vrm`。若外观不满意，用备份还原即可（见下节）。
+- **依蕾娜**：原本是未优化的高模（106 万顶点 / 105 万面，是其他模型的 20 倍以上，56 MB 中约 50 MB 是几何数据），GPU 每帧要处理的顶点数据高达 71 MB，因而显著掉帧。**已用 [`scripts/optimize_vrm.py`](../scripts/optimize_vrm.py) 减面到 16.4 万面（顶点 106.8 万 → 9.6 万）**，原模型备份在 `temp/eileen_original_backup.vrm`。若外观不满意，用备份还原即可（见下节）。
 - **爱蜜莉雅**：模型缺失（此前误放了衣服文件），已归档到 `characters/_archived/zh_爱蜜莉雅.yaml`，前端引用已移除。
 - VRM 0.x 模型需要 `VRMUtils.rotateVRM0(vrm)`（已调用），否则会背对相机。
 
@@ -169,10 +169,12 @@ python scripts/optimize_vrm.py 原模型.vrm -o 输出.vrm -si 0.15 -se 0.005
 **注意事项**：
 
 - **务必先备份原模型**，并在浏览器里确认外观、表情、头发摆动都正常后再替换。
-- **自检通过 ≠ 能加载**。脚本的静态自检覆盖骨骼索引与纹理索引，但真正的渲染行为只有引擎能验证。伊蕾娜第一次优化时就曾在「骨骼映射 54/54 一致」的情况下加载即报错——原因见下一条。替换前请务必实际打开页面确认。
+- **自检通过 ≠ 能加载**。脚本的自检覆盖骨骼索引、纹理索引、顶点属性及其编码，但真正的渲染行为只有引擎能验证。依蕾娜前两次优化都通过了自检却仍有问题：第一次"骨骼映射 54/54 一致"但加载即报错（贴图被回收），第二次属性齐全却**渲染全黑**（量化改写了 UV）。替换前请务必实际打开页面确认。
 - **gltfpack 会回收"仅被 VRM 扩展引用"的贴图**。它只看得懂 glTF 标准材质的纹理引用，像 `_SphereAdd`、`_OutlineWidthTexture` 这类只有 VRM 知道的贴图会被判定为无人使用而删除，`textures` 数组随之变短，VRM 里记录的旧索引就越界了，典型报错是 `Cannot read properties of undefined (reading 'extensions')`（炸在 three.js 的 `GLTFTextureBasisUExtension.loadTexture` 里，很有迷惑性）。脚本会把这类纹理**补回数组末尾**并重映射索引。
 - 该脚本**只支持 VRM 0.x**（`extensions.VRM`）；VRM 1.0（`VRMC_vrm`）的扩展结构不同，需另行适配。
-- 输出会带 `KHR_mesh_quantization`（顶点量化为整数），three.js 原生支持。
+- **`-kv` 与 `-noq` 不可省略**（脚本已默认加上）。少了任意一个都会让模型**整个变黑**，且都是"属性看起来没问题、只在渲染时暴露"的坑：
+  - 少 `-kv`：gltfpack 按"材质用不用得上"裁剪顶点属性，而 MToon 的法线贴图记在 VRM 扩展里它读不懂，于是把 `NORMAL` 整列删掉——材质却还挂着 `normalTexture`，渲染时法线取 (0,0,0)，`dot(N,L)=0`，全黑；`TEXCOORD_1` 同样被删。
+  - 少 `-noq`：量化会把 UV 坐标压缩进 `[0, 1/15]` 这样的窄区间，再在材质上写 `KHR_texture_transform` 补偿；但 **three-vrm 给 VRM 0.x 绑 MToon 贴图时不读这个补偿**（所有 `*UvTransform` 保持单位矩阵），于是所有贴图都去采样纹理左上角的极小区域，同样全黑。量化还会把顶点属性变成整数并给网格节点加 `scale`。
 - 全局比例简化会**无差别地砍掉小网格**：伊蕾娜的 `eyes` 网格在 `-si 0.1` 下从 360 面掉到 28 面。这类面部细节建议配合 `-se` 使用，缩小比例、靠误差约束保护。
 - 回退：把 `temp/eileen_original_backup.vrm` 复制回 `vrm-models/依蕾娜/依蕾娜.vrm` 即可。
 
@@ -221,6 +223,7 @@ python scripts/optimize_vrm.py 原模型.vrm -o 输出.vrm -si 0.15 -se 0.005
 | --- | --- |
 | 模型不显示 / 提示"模型未就绪" | 确认 `vrm-models/<角色>/<角色>.vrm` 存在，且路径与 `CHARACTER_META` 一致 |
 | 模型是白模、无五官 | 见 3.1 / 3.2：色调映射与光照强度 |
+| 模型全黑 | 顶点法线或 UV 被改坏，见第 5 节的 `-kv` / `-noq`。另外 `app.js` 只在模型 URL **变化**时才重新加载，替换文件后要从别的角色切回该角色（或刷新页面）才会真正重载 |
 | 动作没反应 | 打开控制台看是否有 `[Motion]` 日志；确认 `currentAnimationMixer` 已建立（模型已加载完成） |
 | 动作卡住不回待机 | 检查 one-shot 的 `finished` 回调是否被新动作打断（`currentMotionFinishedHandler` 的清理逻辑） |
 | 改了文件但页面没变 | 见 [app/README.md · 3.3](../app/README.md) 缓存说明 |
