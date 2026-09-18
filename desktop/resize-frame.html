@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>调整大小</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    cursor: default;
+  }
+
+  /* 主进程下发初始矩形之前先不显示，避免闪一下左上角的空框 */
+  body:not(.ready) #frame,
+  body:not(.ready) #toolbar { visibility: hidden; }
+
+  /* 原始尺寸虚影：让用户看清「改了多少」 */
+  #ghost {
+    position: fixed;
+    border: 1px dashed rgba(255, 255, 255, 0.35);
+    pointer-events: none;
+  }
+
+  /* 目标框 */
+  #frame {
+    position: fixed;
+    border: 2px solid #ff758c;
+    background: rgba(255, 117, 140, 0.06);
+    cursor: move;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  }
+
+  #label {
+    position: absolute;
+    top: -26px; left: 0;
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: rgba(20, 18, 34, 0.92);
+    border: 1px solid rgba(255, 117, 140, 0.55);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  #label .dim { color: rgba(255, 255, 255, 0.5); }
+
+  .handle {
+    position: absolute;
+    width: 14px; height: 14px;
+    background: #ff758c;
+    border: 2px solid #fff;
+    border-radius: 3px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+  .handle[data-corner="nw"] { left: -8px;  top: -8px;    cursor: nwse-resize; }
+  .handle[data-corner="ne"] { right: -8px; top: -8px;    cursor: nesw-resize; }
+  .handle[data-corner="sw"] { left: -8px;  bottom: -8px; cursor: nesw-resize; }
+  .handle[data-corner="se"] { right: -8px; bottom: -8px; cursor: nwse-resize; }
+
+  #toolbar {
+    position: fixed;
+    left: 50%; bottom: 28px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: rgba(20, 18, 34, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    white-space: nowrap;
+  }
+  #toolbar .hint { color: rgba(255, 255, 255, 0.62); font-size: 12px; margin-right: 6px; }
+  #toolbar button {
+    font: inherit;
+    font-size: 13px;
+    padding: 7px 16px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    cursor: pointer;
+  }
+  #toolbar button:hover { background: rgba(255, 255, 255, 0.16); }
+  #toolbar button.primary {
+    background: linear-gradient(135deg, #ff758c 0%, #ff7eb3 100%);
+    border-color: transparent;
+    font-weight: 600;
+  }
+  #toolbar button.primary:hover { filter: brightness(1.08); }
+</style>
+</head>
+<body>
+  <div id="ghost"></div>
+
+  <div id="frame">
+    <div id="label"></div>
+    <div class="handle" data-corner="nw"></div>
+    <div class="handle" data-corner="ne"></div>
+    <div class="handle" data-corner="sw"></div>
+    <div class="handle" data-corner="se"></div>
+  </div>
+
+  <div id="toolbar">
+    <span class="hint" id="hint"></span>
+    <button id="btn-cancel">取消</button>
+    <button id="btn-ok" class="primary">确认</button>
+  </div>
+
+<script>
+(() => {
+  'use strict'
+
+  // 坐标说明：本窗口铺满目标显示器的工作区，所以
+  //   屏幕 DIP 坐标 = origin + 窗口内 client 坐标
+  let origin = { x: 0, y: 0 }
+  let work = { width: 0, height: 0 }
+  let aspect = 1                    // 宽/高，锁定不变
+  let minWidth = 200
+  let original = null               // 进入时的原始矩形（屏幕坐标）
+  let rect = null                   // 当前矩形（屏幕坐标）
+  let drag = null                   // { mode: 'resize'|'move', corner, anchor, startRect, startPointer }
+
+  const frameEl = document.getElementById('frame')
+  const ghostEl = document.getElementById('ghost')
+  const labelEl = document.getElementById('label')
+  const hintEl = document.getElementById('hint')
+
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi)
+
+  /** 屏幕坐标矩形 → 窗口内 client 坐标 */
+  function toClient(r) {
+    return { x: r.x - origin.x, y: r.y - origin.y, width: r.width, height: r.height }
+  }
+
+  function render() {
+    const c = toClient(rect)
+    frameEl.style.left = c.x + 'px'
+    frameEl.style.top = c.y + 'px'
+    frameEl.style.width = c.width + 'px'
+    frameEl.style.height = c.height + 'px'
+
+    const g = toClient(original)
+    ghostEl.style.left = g.x + 'px'
+    ghostEl.style.top = g.y + 'px'
+    ghostEl.style.width = g.width + 'px'
+    ghostEl.style.height = g.height + 'px'
+
+    const w = Math.round(rect.width)
+    const h = Math.round(rect.height)
+    const ow = Math.round(original.width)
+    const oh = Math.round(original.height)
+    labelEl.innerHTML = `${w} × ${h}` + (w === ow && h === oh ? '' : ` <span class="dim">(原 ${ow} × ${oh})</span>`)
+  }
+
+  function setRect(next) {
+    rect = next
+    render()
+  }
+
+  /** 拖动角：保持比例，锚定对角，限制在工作区内 */
+  function resizeTo(corner, px, py) {
+    const dirX = corner === 'ne' || corner === 'se' ? 1 : -1
+    const dirY = corner === 'sw' || corner === 'se' ? 1 : -1
+    const anchor = drag.anchor
+
+    const rawW = Math.abs(px - anchor.x)
+    const rawH = Math.abs(py - anchor.y)
+    const start = drag.startRect
+
+    // 取「相对原始尺寸变化更明显」的那个轴来驱动，避免两个轴互相打架
+    const scaleByW = rawW / start.width
+    const scaleByH = rawH / start.height
+    const scale = Math.abs(scaleByW - 1) > Math.abs(scaleByH - 1) ? scaleByW : scaleByH
+
+    const availW = dirX > 0 ? work.width - anchor.x : anchor.x
+    const availH = dirY > 0 ? work.height - anchor.y : anchor.y
+    const maxWidth = Math.min(availW, availH * aspect)
+
+    let width = clamp(start.width * scale, minWidth, Math.max(minWidth, maxWidth))
+    let height = width / aspect
+
+    setRect({
+      x: dirX > 0 ? anchor.x : anchor.x - width,
+      y: dirY > 0 ? anchor.y : anchor.y - height,
+      width,
+      height
+    })
+  }
+
+  /** 拖动框体：平移，限制在工作区内 */
+  function moveTo(px, py) {
+    const start = drag.startRect
+    const x = clamp(start.x + (px - drag.startPointer.x), origin.x, origin.x + work.width - rect.width)
+    const y = clamp(start.y + (py - drag.startPointer.y), origin.y, origin.y + work.height - rect.height)
+    setRect({ x, y, width: rect.width, height: rect.height })
+  }
+
+  // ---------------------------------------------------------------- 交互
+
+  document.querySelectorAll('.handle').forEach((el) => {
+    el.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      el.setPointerCapture(event.pointerId)
+      startResize(el.dataset.corner, event)
+    })
+  })
+
+  frameEl.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return
+    if (event.target.classList.contains('handle')) return
+    event.preventDefault()
+    frameEl.setPointerCapture(event.pointerId)
+    drag = {
+      mode: 'move',
+      startPointer: { x: event.clientX, y: event.clientY },
+      startRect: { ...rect }
+    }
+  })
+
+  function startResize(corner, event) {
+    const dirX = corner === 'ne' || corner === 'se' ? 1 : -1
+    const dirY = corner === 'sw' || corner === 'se' ? 1 : -1
+    drag = {
+      mode: 'resize',
+      corner,
+      startRect: { ...rect },
+      anchor: {
+        x: dirX > 0 ? rect.x : rect.x + rect.width,
+        y: dirY > 0 ? rect.y : rect.y + rect.height
+      }
+    }
+    resizeTo(corner, event.clientX + origin.x, event.clientY + origin.y)
+  }
+
+  window.addEventListener('pointermove', (event) => {
+    if (!drag) return
+    // 拖动时指针可能移出窗口，用 client 坐标仍可继续（已 setPointerCapture）
+    const px = event.clientX + origin.x
+    const py = event.clientY + origin.y
+    if (drag.mode === 'resize') resizeTo(drag.corner, px, py)
+    else moveTo(px, py)
+  })
+
+  window.addEventListener('pointerup', () => { drag = null })
+  window.addEventListener('pointercancel', () => { drag = null })
+
+  // ---------------------------------------------------------------- 命中区穿透
+  //
+  // 不用 mouseenter / mouseleave：把手用了负偏移（伸出框外 8px），
+  // 从框外进入把手时父元素的 mouseenter 不一定触发，容易漏判。
+  // 改用 pointermove + elementFromPoint 直接问「指针底下是不是可交互元素」，
+  // 判定与视觉完全一致。
+  //
+  // 注意：窗口初始是「可交互」的，只有确认 mousemove 能送达后才敢开启穿透 ——
+  // 否则万一 forward 转发失效，框就再也点不动了（与角色窗口同样的防死锁策略）。
+  let pointerAlive = false
+  let lastInteractive = null
+
+  window.addEventListener('pointermove', (event) => {
+    pointerAlive = true
+
+    const el = document.elementFromPoint(event.clientX, event.clientY)
+    const interactive = Boolean(el && el.closest('#frame, #toolbar'))
+    if (interactive === lastInteractive) return
+    lastInteractive = interactive
+    window.resizeApi.hover(interactive)
+  })
+
+  // ---------------------------------------------------------------- 按钮与快捷键
+  document.getElementById('btn-ok').addEventListener('click', () => window.resizeApi.commit(rect))
+  document.getElementById('btn-cancel').addEventListener('click', () => window.resizeApi.cancel())
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); window.resizeApi.cancel() }
+    else if (event.key === 'Enter') { event.preventDefault(); window.resizeApi.commit(rect) }
+  })
+
+  // ---------------------------------------------------------------- 初始化
+  window.resizeApi.onInit((payload) => {
+    origin = payload.origin
+    work = payload.work
+    aspect = payload.aspect
+    minWidth = payload.minWidth
+    original = { ...payload.rect }
+    rect = { ...payload.rect }
+    hintEl.textContent = `拖动四角调整大小 · 已锁定比例 ${aspect.toFixed(3)} · Esc 取消`
+    render()
+    document.body.classList.add('ready')
+    window.focus()
+  })
+})()
+</script>
+</body>
+</html>

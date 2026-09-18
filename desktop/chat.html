@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>聊天</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* 窗口本身是透明的；圆角、描边、阴影都画在这一层 */
+  #panel {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(21, 20, 32, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.42);
+  }
+
+  /* 图标一律用内联 SVG，不用 emoji（emoji 在 Windows 上会被替换成彩色字形，
+     与 11~12px 的界面字体完全不搭）。 */
+  .icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: rgba(236, 234, 245, 0.6);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .icon-btn svg { width: 13px; height: 13px; display: block; }
+  .icon-btn:hover { background: rgba(255, 255, 255, 0.1); color: #eceaf5; }
+  .icon-btn[aria-pressed="true"] {
+    background: rgba(255, 117, 140, 0.22);
+    color: #ff9db0;
+  }
+  /* 收起/展开按钮：两个箭头按状态二选一 */
+  #btn-collapse .ico-up { display: none; }
+  body.collapsed #btn-collapse .ico-down { display: none; }
+  body.collapsed #btn-collapse .ico-up { display: block; }
+  body.collapsed #log { display: none; }
+
+  /* ---------------------------------------------------------- 顶栏（可拖动） */
+  #header {
+    -webkit-app-region: drag;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 4px 0 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    flex-shrink: 0;
+  }
+  #dot { width: 6px; height: 6px; border-radius: 50%; background: #50fa7b; flex-shrink: 0; }
+  #dot.busy { background: #ffb86c; }
+  #dot.err { background: #ff5555; }
+  #name { font-size: 11px; font-weight: 600; color: #eceaf5; }
+  #status {
+    margin-left: auto;
+    padding-right: 2px;
+    font-size: 10px;
+    color: rgba(236, 234, 245, 0.4);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  button.no-drag { -webkit-app-region: no-drag; }
+
+  /* ---------------------------------------------------------- 消息区 */
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 5px 8px 1px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  #log::-webkit-scrollbar { width: 6px; }
+  #log::-webkit-scrollbar-track { background: transparent; }
+  #log::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+  }
+
+  /* 不画「我 / 角色」标签：靠左右对齐 + 颜色区分说话人，
+     在这点高度里每行省下的文字高度很关键。 */
+  .msg { display: flex; flex-direction: column; }
+  .msg .body {
+    max-width: 88%;
+    padding: 3px 7px;
+    border-radius: 8px;
+    color: #eceaf5;
+    word-break: break-word;
+    white-space: pre-wrap;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .msg.user { align-items: flex-end; }
+  .msg.user .body { background: rgba(255, 117, 140, 0.19); color: #ffe7ed; }
+  .msg.ai .body { background: rgba(255, 255, 255, 0.07); }
+  .msg.system { align-items: center; }
+  .msg.system .body {
+    max-width: 100%;
+    background: rgba(255, 85, 85, 0.14);
+    color: #ffc9c9;
+    font-size: 11px;
+  }
+
+  /* ---------------------------------------------------------- 输入区 */
+  #footer {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 5px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    flex-shrink: 0;
+  }
+  #input {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    font: inherit;
+    font-size: 12px;
+    padding: 0 8px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+    outline: none;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  #input::placeholder { color: rgba(236, 234, 245, 0.3); }
+  #input:focus {
+    border-color: rgba(255, 117, 140, 0.5);
+    background: rgba(255, 255, 255, 0.09);
+  }
+
+  #btn-send { background: rgba(255, 117, 140, 0.88); color: #fff; }
+  #btn-send:hover { background: #ff758c; }
+
+  #btn-mic.recording {
+    color: #ff5555;
+    background: rgba(255, 85, 85, 0.16);
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <div id="header">
+      <span id="dot"></span>
+      <span id="name">聊天</span>
+      <span id="status">就绪</span>
+      <button class="icon-btn no-drag" id="btn-collapse" title="缩小：只留输入行" aria-pressed="false">
+        <svg class="ico-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m6 9 6 6 6-6"/>
+        </svg>
+        <svg class="ico-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m18 15-6-6-6 6"/>
+        </svg>
+      </button>
+      <button class="icon-btn no-drag" id="btn-pin" title="不自动隐藏：当前失焦后收起" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 17v5"/>
+          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
+        </svg>
+      </button>
+      <button class="icon-btn no-drag" id="btn-hide" title="隐藏（Esc）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M5 12h14"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="log"></div>
+
+    <div id="footer">
+      <button class="icon-btn" id="btn-mic" title="语音输入（点一下开始，再点停止）">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 19v3"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <rect x="9" y="2" width="6" height="13" rx="3"/>
+        </svg>
+      </button>
+      <input id="input" type="text" placeholder="说点什么…（Enter 发送）" autocomplete="off" />
+      <button class="icon-btn" id="btn-interrupt" title="打断当前回复">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="6" y="6" width="12" height="12" rx="2.5"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="btn-send" title="发送">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 19V5"/>
+          <path d="m5 12 7-7 7 7"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  'use strict'
+
+  const api = window.petChat
+  const $ = (id) => document.getElementById(id)
+  const logEl = $('log')
+  const inputEl = $('input')
+  const dotEl = $('dot')
+  const statusEl = $('status')
+  const collapseEl = $('btn-collapse')
+  const pinEl = $('btn-pin')
+
+  let recording = false
+  let mediaStream = null
+  let audioContext = null
+  let processor = null
+  let autoStopTimer = null
+  const MAX_RECORD_MS = 20000
+
+  // ------------------------------------------------------------ 消息渲染
+
+  function nearBottom() {
+    return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40
+  }
+
+  function appendEntry(entry) {
+    const stick = nearBottom()
+
+    const wrap = document.createElement('div')
+    wrap.className = 'msg ' + (entry.role || 'ai')
+
+    const body = document.createElement('div')
+    body.className = 'body'
+    body.textContent = entry.text
+
+    wrap.appendChild(body)
+    logEl.appendChild(wrap)
+
+    if (stick) logEl.scrollTop = logEl.scrollHeight
+  }
+
+  function setStatus(text) {
+    statusEl.textContent = text
+    dotEl.className = text === '就绪' ? '' : text === '出错' || text === '已断开' ? 'err' : 'busy'
+  }
+
+  // ------------------------------------------------------------ 发送
+
+  function send() {
+    const text = inputEl.value.trim()
+    if (!text) return
+    inputEl.value = ''
+    // 本地立刻回显，不用等后端回 transcription
+    appendEntry({ role: 'user', text })
+    api.sendText(text)
+    setStatus('思考中…')
+  }
+
+  $('btn-send').addEventListener('click', send)
+  inputEl.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      send()
+    }
+  })
+  $('btn-interrupt').addEventListener('click', () => {
+    api.interrupt()
+    setStatus('已打断')
+  })
+
+  // ------------------------------------------------------------ 语音输入
+  //
+  // 与 vrm_frontend/app.js 的录音链路保持一致：
+  // AudioContext({sampleRate:16000}) + ScriptProcessor(4096) → 逐块发 float32 数组，
+  // 停止时发 mic-audio-end 让后端跑 ASR。格式不一致会导致识别结果乱码。
+
+  async function startRecording() {
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, sampleRate: 16000 }
+      })
+    } catch (error) {
+      setStatus('麦克风不可用')
+      console.error('[chat] getUserMedia 失败', error)
+      return
+    }
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    audioContext = new AudioCtx({ sampleRate: 16000 })
+    const source = audioContext.createMediaStreamSource(mediaStream)
+    processor = audioContext.createScriptProcessor(4096, 1, 1)
+
+    recording = true
+    $('btn-mic').classList.add('recording')
+    setStatus('录音中…')
+
+    processor.onaudioprocess = (event) => {
+      if (!recording) return
+      const chunk = event.inputBuffer.getChannelData(0)
+      api.sendAudioChunk(Array.prototype.slice.call(chunk))
+    }
+    source.connect(processor)
+    processor.connect(audioContext.destination)
+
+    // 兜底：防止忘记停止而无限录音
+    autoStopTimer = setTimeout(stopRecording, MAX_RECORD_MS)
+  }
+
+  function stopRecording() {
+    if (!recording && !mediaStream) return
+    recording = false
+    if (autoStopTimer) {
+      clearTimeout(autoStopTimer)
+      autoStopTimer = null
+    }
+    $('btn-mic').classList.remove('recording')
+
+    if (processor) {
+      processor.onaudioprocess = null
+      try { processor.disconnect() } catch { /* 已断开 */ }
+      processor = null
+    }
+    if (audioContext) {
+      try { audioContext.close() } catch { /* 已关闭 */ }
+      audioContext = null
+    }
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((track) => track.stop())
+      mediaStream = null
+    }
+
+    api.endAudio()
+    setStatus('识别中…')
+  }
+
+  $('btn-mic').addEventListener('click', () => {
+    if (recording) stopRecording()
+    else startRecording()
+  })
+
+  // ------------------------------------------------------------ 窗口行为
+
+  $('btn-hide').addEventListener('click', () => api.hide())
+
+  // 两个开关是两件事，别混在一起：
+  //   btn-collapse → 收起消息区（窗口高度跟着变，由主进程负责）
+  //   btn-pin      → 失焦后是否自动收起窗口
+  let collapsed = false
+  let autoHide = true
+
+  function renderCollapseUI() {
+    document.body.classList.toggle('collapsed', collapsed)
+    collapseEl.setAttribute('aria-pressed', String(collapsed))
+    collapseEl.title = collapsed ? '展开消息区' : '缩小：只留输入行'
+  }
+
+  function renderPinUI() {
+    pinEl.setAttribute('aria-pressed', String(!autoHide))
+    pinEl.title = autoHide ? '不自动隐藏：当前失焦后收起' : '已锁定：失焦后仍保留'
+  }
+
+  collapseEl.addEventListener('click', () => {
+    collapsed = !collapsed
+    renderCollapseUI()
+    api.setCollapsed(collapsed)
+  })
+
+  pinEl.addEventListener('click', () => {
+    autoHide = !autoHide
+    renderPinUI()
+    api.setAutoHide(autoHide)
+  })
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      if (recording) stopRecording()
+      api.hide()
+    }
+  })
+
+  // 关闭窗口前先停录音，避免留下悬挂的麦克风
+  window.addEventListener('beforeunload', () => { if (recording) stopRecording() })
+
+  // ------------------------------------------------------------ 初始化
+
+  api.onAppend(appendEntry)
+  api.onStatus(setStatus)
+
+  api.getLog().then((state) => {
+    if (state && Array.isArray(state.entries)) {
+      state.entries.forEach(appendEntry)
+      if (state.status) setStatus(state.status)
+      autoHide = state.autoHide !== false
+      collapsed = Boolean(state.collapsed)
+    }
+    renderCollapseUI()
+    renderPinUI()
+    logEl.scrollTop = logEl.scrollHeight
+    inputEl.focus()
+  })
+})()
+</script>
+</body>
+</html>

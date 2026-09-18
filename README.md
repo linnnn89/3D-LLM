@@ -49,11 +49,13 @@ ENGLISH README | [中文 README](./README.CN.md) | [한국어 README](./README.K
 | --- | --- | --- |
 | **3D VRM 数字人视口** | `vrm_frontend/` | 完整的 three.js + three-vrm 前端，经服务 `/vrm` 路径挂载，含表情、口型、眨眼、注视、点击互动 |
 | **肢体动作系统** | `vrm_frontend/app.js` + `motions/` | 双引擎：外部 `.vrma` 动捕优先，缺失时自动降级为程序化骨骼关键帧 |
+| **3D 桌宠外壳** | `desktop/` | Electron 无框透明窗口：局部点击穿透、拖动、托盘、拉伸框改尺寸、独立聊天悬浮窗。**不修改 `vrm_frontend/` 源码**，聊天窗复用角色窗口那一条 WebSocket |
 | **本地桌面套壳启动器** | `app/` | 自动拉起后端 + Edge/Chrome App 视口独立窗口，关窗口即停服。详见 [app/README.md](./app/README.md) |
-| **3D 角色** | `vrm-models/`、`characters/` | 喜多郁代 (Kira)、由比滨结衣、雷电将军、依蕾娜；爱蜜莉雅因缺模型已归档 |
-| **渲染修正** | `vrm_frontend/app.js` | 移除 `ACESFilmicToneMapping`、光照总量 4.4 → 2.4（MToon 卡通渲染下前者会把浅色贴图洗成白模） |
-| **静态资源缓存** | `src/open_llm_vtuber/server.py` | 对 `.js/.mjs/.html/.css` 下发 `Cache-Control: no-cache`，前端改动刷新即生效 |
+| **3D 角色** | `vrm-models/`、`characters/` | 喜多郁代 (Kira)、由比滨结衣、雷电将军；爱蜜莉雅（缺模型）、依蕾娜（外观无法修复）已归档到 `characters/_archived/` |
+| **渲染修正** | `vrm_frontend/app.js` | 移除 `ACESFilmicToneMapping`、光照总量 4.4 → 2.4（MToon 卡通渲染下前者会把浅色贴图洗成白模）；另外摘掉「`normalScale` 为 0 却指向纯黑占位图」的法线贴图，否则这些材质会整体过曝 |
+| **静态资源缓存** | `src/open_llm_vtuber/server.py` | 对 `.js/.mjs/.html/.css/.vrm` 下发 `Cache-Control: no-cache`，前端与模型改动刷新即生效 |
 | **模型减面工具** | `scripts/optimize_vrm.py` | 用 gltfpack 简化网格，并把被丢弃的 VRM 扩展按骨骼索引偏移搬回，无需 Blender 即可把高模压到可实时渲染的面数 |
+| **工程记录** | `doc/` | 桌宠可行性分析、无框窗口 UI 规范、踩坑与失败记录（根因 / 判据 / 教训） |
 
 各模块的架构、参数、注意事项与排错方法，分别见对应目录下的 `README.md`。
 
@@ -130,6 +132,27 @@ Because the wrapper simply points at the running server, and `/vrm` is mounted d
 > Heads-up: if port `12393` is already listening, the launcher **connects to that existing process instead of restarting it**, so changes made to the Python backend (`src/`) will not apply until you kill and restart it.
 
 See **[app/README.md](./app/README.md)** for the full architecture, startup chain, CLI flags and troubleshooting table.
+
+
+
+## 🐾 Desktop Pet (this fork)
+
+`desktop/` is an **Electron shell** hosting the same `/vrm/` viewport in a **frameless, fully transparent, always-on-top** window — a VRM character standing directly on your desktop, with no browser and no taskbar entry.
+
+Launch with `启动桌宠.lnk` at the repo root. It points straight at `electron.exe`, which is a GUI-subsystem binary, so **no console window is created** (unlike `npm start`, which spawns a `cmd.exe` first).
+
+| Capability | Notes |
+| --- | --- |
+| Frameless / transparent / always-on-top | `focusable:false` → never steals focus, never appears in Alt+Tab |
+| **Partial click-through** | Only the character's body accepts the mouse; the rest of the window passes clicks to whatever is underneath |
+| Drag · resize · tray · hotkeys | Drag the character to move the window; `Ctrl+Shift+R` resize, `Ctrl+Shift+S` settings, `Ctrl+Shift+Space` chat |
+| **Standalone chat popup** | 320×140, collapsible to 320×58. It does **not** open a second WebSocket — everything is relayed via IPC to the avatar window's single connection |
+
+> ⚠️ The backend clones a `ServiceContext` per `/client-ws` connection, so a second connection would fork the conversation history **and** stop the character from speaking (TTS is pushed to only one of them). That is why the chat popup has no socket of its own.
+
+The window layer is deliberately **non-invasive**: `vrm_frontend/` is not modified at all.
+
+See **[desktop/README.md](./desktop/README.md)** for the window-layer design, click-through mechanics, tray layout and measured results. Design notes and post-mortems live in [`doc/`](./doc/README.md).
 
 
 

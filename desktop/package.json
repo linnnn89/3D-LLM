@@ -1,0 +1,14 @@
+{
+  "name": "olv-desktop-pet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-LLM-VTuber 3D VRM 桌宠壳（Electron 初版 / 技术验证用）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^44.4.2",
+    "install": "^0.13.0"
+  }
+}

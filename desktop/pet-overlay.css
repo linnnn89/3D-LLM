@@ -1,0 +1,53 @@
+/*
+ * 桌宠模式覆盖样式
+ *
+ * 由 Electron 侧通过 webContents.insertCSS() 注入。
+ * 目的：让 vrm_frontend/ 在不做任何源码修改的前提下，变成透明桌宠视口。
+ * 因此这里只做「减法」（去背景、去 UI 外壳），不改动任何布局逻辑。
+ */
+
+/* 去掉页面自身的不透明渐变背景 —— 否则窗口透明无效 */
+html,
+body {
+  background: transparent !important;
+}
+
+/* 加载遮罩原本是不透明的 #17152b，改成透明，加载时不会糊住桌面 */
+.loading-screen {
+  background: transparent !important;
+}
+
+/* 隐藏网页版外壳：顶部角色卡/设置按钮、底部快捷问题与输入条 */
+.header-bar,
+.bottom-dock {
+  display: none !important;
+}
+
+/* UI 层：内容改为贴底，并留出边距 */
+.ui-layer {
+  justify-content: flex-end !important;
+  padding: 0 14px 14px 14px !important;
+}
+
+/* 气泡贴到人像下方居中；保持 pointer-events:none 以免干扰拖动/穿透 */
+.center-content {
+  justify-content: flex-end !important;
+}
+
+.dialogue-bubble {
+  margin: 0 !important;
+  /* 半透明。0.6 = 60% 不透明；想更透就把这个数改小（0.4 即透明 60%） */
+  background: rgba(24, 23, 40, 0.6) !important;
+  /* 去掉毛玻璃：透明窗口里 backdrop-filter 要合成 WebGL 输出，是**常驻**GPU 开销，
+     对桌宠不划算。想要这个效果，把下面两行的值改回 blur(20px) 即可。 */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-color: rgba(255, 117, 140, 0.45) !important;
+  pointer-events: none !important;
+}
+
+/*
+ * 注意：不要在这里给 canvas 设 cursor —— vrm_frontend/app.js:1154 会按 raycast
+ * 结果写 canvas.style.cursor（命中角色 'pointer'，否则 'default'）。
+ * 那个内联样式是桌宠判定「鼠标是否在角色身上」的唯一信号，覆盖它会破坏点击穿透。
+ */

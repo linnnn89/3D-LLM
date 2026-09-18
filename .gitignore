@@ -73,6 +73,7 @@ conf.yaml.backup
 
 tmp/
 temp/
+trash/
 private/
 mcp_servers.json
 
@@ -82,6 +83,11 @@ mcp_servers.json
 *.enc
 data/keys.enc
 data/
+
+# Node.js (desktop/ Electron 外壳)
+node_modules/
+npm-debug.log*
+.npm/
 
 # Shortcuts & Binaries
 *.lnk

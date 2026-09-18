@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>桌宠设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    background: #17152b;
+    color: #eceaf5;
+    padding: 18px 20px 24px;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: rgba(236, 234, 245, 0.5); font-size: 12px; margin-bottom: 16px; }
+
+  section {
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+  }
+  section > .title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #ff9db1;
+    letter-spacing: 0.04em;
+    margin-bottom: 9px;
+  }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .row + .row { margin-top: 9px; }
+  .grow { flex: 1; }
+  .val { color: rgba(236, 234, 245, 0.75); font-variant-numeric: tabular-nums; }
+
+  button {
+    font: inherit;
+    padding: 6px 13px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.07);
+    color: #fff;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(255, 255, 255, 0.14); }
+  button.primary {
+    background: linear-gradient(135deg, #ff758c 0%, #ff7eb3 100%);
+    border-color: transparent;
+    font-weight: 600;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  button[aria-pressed="true"] {
+    background: rgba(255, 117, 140, 0.28);
+    border-color: rgba(255, 117, 140, 0.6);
+  }
+
+  label.check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  input[type="checkbox"] { width: 15px; height: 15px; accent-color: #ff758c; cursor: pointer; }
+  .hint { color: rgba(236, 234, 245, 0.42); font-size: 11.5px; line-height: 1.55; }
+</style>
+</head>
+<body>
+  <h1>桌宠设置</h1>
+  <div class="sub">更改后立即生效；窗口尺寸与位置会自动记住。</div>
+
+  <section>
+    <div class="title">角色大小</div>
+    <div class="row">
+      <span class="grow">当前尺寸：<span class="val" id="size">—</span></span>
+      <button class="primary" id="btn-resize">更改大小…</button>
+    </div>
+    <div class="row">
+      <span class="grow">预设：</span>
+      <button data-preset="small">小</button>
+      <button data-preset="medium">中</button>
+      <button data-preset="large">大</button>
+    </div>
+    <div class="row hint">
+      「更改大小…」会浮出一层拉伸框：拖四角自由伸缩（已锁定比例不会变形），
+      拖框体可移动位置，按「确认」生效或「取消」放弃。调整期间角色不会重绘，不占 GPU。
+    </div>
+  </section>
+
+  <section>
+    <div class="title">取景</div>
+    <div class="row">
+      <button data-framing="bust">胸像</button>
+      <button data-framing="half">半身</button>
+      <button data-framing="full">全身</button>
+    </div>
+  </section>
+
+  <section>
+    <div class="title">显示</div>
+    <label class="check"><input type="checkbox" id="chk-top" /> 始终置顶</label>
+    <label class="check" style="margin-top:9px">
+      <input type="checkbox" id="chk-clickthrough" /> 点击穿透（只有角色挡住鼠标）
+    </label>
+  </section>
+
+  <section>
+    <div class="title">其它</div>
+    <div class="row">
+      <button id="btn-reset-pos">回到右下角</button>
+      <button id="btn-log">打开日志</button>
+      <button id="btn-web">打开网页版设置</button>
+    </div>
+  </section>
+
+  <div class="hint" id="foot"></div>
+
+<script>
+(() => {
+  'use strict'
+
+  const $ = (id) => document.getElementById(id)
+  const api = window.petSettings
+
+  function paint(state) {
+    $('size').textContent = `${state.width} × ${state.height}`
+    $('chk-top').checked = state.alwaysOnTop
+    $('chk-clickthrough').checked = state.clickThrough
+    $('foot').textContent = `快捷键：Ctrl+Shift+R 更改大小 · Ctrl+Shift+S 设置` +
+      (state.shortcutsOk ? '' : '（部分快捷键被系统占用）')
+
+    document.querySelectorAll('[data-preset]').forEach((el) => {
+      el.setAttribute('aria-pressed', String(state.preset === el.dataset.preset))
+    })
+    document.querySelectorAll('[data-framing]').forEach((el) => {
+      el.setAttribute('aria-pressed', String(state.framing === el.dataset.framing))
+    })
+  }
+
+  document.querySelectorAll('[data-preset]').forEach((el) => {
+    el.addEventListener('click', () => api.action({ type: 'preset', key: el.dataset.preset }))
+  })
+  document.querySelectorAll('[data-framing]').forEach((el) => {
+    el.addEventListener('click', () => api.action({ type: 'framing', key: el.dataset.framing }))
+  })
+
+  $('btn-resize').addEventListener('click', () => api.action({ type: 'resize' }))
+  $('chk-top').addEventListener('change', (e) => api.action({ type: 'alwaysOnTop', value: e.target.checked }))
+  $('chk-clickthrough').addEventListener('change', (e) => api.action({ type: 'clickThrough', value: e.target.checked }))
+  $('btn-reset-pos').addEventListener('click', () => api.action({ type: 'resetPosition' }))
+  $('btn-log').addEventListener('click', () => api.action({ type: 'openLog' }))
+  $('btn-web').addEventListener('click', () => api.action({ type: 'openWebSettings' }))
+
+  api.onState(paint)
+  api.getState().then(paint)
+})()
+</script>
+</body>
+</html>
