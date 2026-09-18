@@ -103,7 +103,7 @@ Stop-Process -Id <PID> -Force
 
 ### 3.3 浏览器缓存导致"改了还是旧的"
 
-套壳窗口使用持久化 profile（`%TEMP%\vtuber_app_profile`），会缓存 JS/HTML。为此 `server.py` 的 `CORSStaticFiles` 已对 `.js/.mjs/.html/.css` 下发：
+套壳窗口使用持久化 profile（`%TEMP%\vtuber_app_profile`），会缓存 JS/HTML，也会缓存 3D 模型（`.vrm` 体积大，替换后若命中旧缓存尤其难察觉）。为此 `server.py` 的 `CORSStaticFiles` 已对 `.js/.mjs/.html/.css/.vrm` 下发：
 
 ```
 Cache-Control: no-cache, must-revalidate
