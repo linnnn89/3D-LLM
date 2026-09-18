@@ -38,20 +38,6 @@ const CHARACTER_META = {
     vrm: '/vrm-models/喜多郁代/喜多郁代.vrm',
     greeting: 'こんにちは！結束バンドのギターボーカル、喜多郁代です！今日も元気にいきましょーっ！',
     chips: ['結束バンドについて教えて', 'ひとりちゃんは元気？', 'キタオーラ発射〜！✨', '今日の予定は何？']
-  },
-  '依蕾娜': {
-    name: 'イレイナ',
-    short: '魔',
-    vrm: '/vrm-models/依蕾娜/依蕾娜.vrm',
-    greeting: 'そう、私です！旅の魔女イレイナと申します。ふふっ、この街にはどんな物語があるのかしら？',
-    chips: ['その美しい魔女は誰？', '旅の思い出を聞かせて', '焼きたてのパンはある？', '魔法について教えて']
-  },
-  '伊蕾娜': {
-    name: 'イレイナ',
-    short: '魔',
-    vrm: '/vrm-models/依蕾娜/依蕾娜.vrm',
-    greeting: 'そう、私です！旅の魔女イレイナと申します。ふふっ、この街にはどんな物語があるのかしら？',
-    chips: ['その美しい魔女は誰？', '旅の思い出を聞かせて', '焼きたてのパンはある？', '魔法について教えて']
   }
 };
 
@@ -216,6 +202,84 @@ function applyNaturalPose(vrm) {
 }
 
 // --- 3. Load VRM Model ---
+
+/**
+ * 摘掉「已被作者禁用」的法线贴图（normalScale 为 0 时）。
+ *
+ * three.js 的法线贴图计算只把 normalScale 的 xy 清零，z 仍取贴图蓝通道 * 2 - 1。
+ * 部分 VRM（如喜多郁代）用 `_BumpScale = 0` 表示「不要凹凸」，却把 `_BumpMap` 指向一张
+ * 纯黑占位图（Shader_NoneBlack.png，蓝通道 ≈ 0）。此时算出的切线空间法线是 (0, 0, -1)，
+ * 等于把法线整体翻转，MToon 的 rim 项 `saturate(1 - dot(viewDir, normal))` 随即饱和到 1，
+ * 把纯白 `parametricRimColorFactor` 叠加到整个表面——表现为脸和皮肤被洗成一片白、五官消失。
+ *
+ * normalScale 为 0 本意就是「不要凹凸」，直接摘掉这张贴图即可；
+ * 对合法的平坦法线图（蓝通道 ≈ 255，结果仍是 +N）来说这也完全等价，故可无条件处理。
+ */
+function dropDisabledNormalMaps(vrm) {
+  let dropped = 0;
+  vrm.scene.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const material of materials) {
+      if (
+        material.normalMap &&
+        material.normalScale &&
+        material.normalScale.x === 0 &&
+        material.normalScale.y === 0
+      ) {
+        material.normalMap = null;
+        material.needsUpdate = true;
+        dropped++;
+      }
+    }
+  });
+  if (dropped) {
+    console.warn(
+      `[VRM] 已停用 ${dropped} 处被禁用的法线贴图（normalScale 为 0，其蓝通道会翻转法线导致面部过曝）`
+    );
+  }
+}
+
+/**
+ * 把模型整体缩放到统一的「头骨高度」。
+ *
+ * 各 VRM 的世界尺寸并不一致（实测 head 骨世界高度：由比滨结衣 1.4111 / 喜多郁代 1.6014 /
+ * 雷电将军 1.5299），而相机只有一套固定参数，于是个子高的角色会被框外裁掉脑袋
+ * （喜多郁代此前只露出嘴以下就是这么来的）。
+ *
+ * 为什么不按「包围盒高度」归一：喜多郁代的呆毛把包围盒顶到 1.9395，而她的 head 骨在
+ * 1.6014 —— 用包围盒会被头发带偏，把角色整体缩得过小。**头骨才是取景真正要锚的地方。**
+ *
+ * 归一之后，相机、取景档位、OrbitControls 的 min/max 距离、点击 raycast 全都
+ * 不需要再按角色区分。
+ */
+const REFERENCE_HEAD_HEIGHT = 1.4111 // 由比滨结衣的 head 骨世界高度 —— 取景以她为基准
+
+function normalizeModelScale(vrm) {
+  if (!vrm || !vrm.humanoid) return;
+
+  const headNode = vrm.humanoid.getRawBoneNode('head');
+  if (!headNode) {
+    console.warn('[VRM] 没有 head 骨，跳过尺寸归一化');
+    return;
+  }
+
+  // getWorldPosition 读的是 matrixWorld，必须先把整棵树的矩阵刷一遍
+  vrm.scene.updateMatrixWorld(true);
+  const headY = headNode.getWorldPosition(new THREE.Vector3()).y;
+  if (!Number.isFinite(headY) || headY <= 0.01) {
+    console.warn(`[VRM] head 骨高度异常 (${headY})，跳过尺寸归一化`);
+    return;
+  }
+
+  const scale = REFERENCE_HEAD_HEIGHT / headY;
+  vrm.scene.scale.multiplyScalar(scale);
+  vrm.scene.updateMatrixWorld(true);
+  console.log(
+    `[VRM] 尺寸归一化：head 骨 ${headY.toFixed(4)} → ×${scale.toFixed(4)}（目标 ${REFERENCE_HEAD_HEIGHT}）`
+  );
+}
+
 async function loadVRM(url, characterName = '') {
   if (loadingScreen) {
     loadingScreen.classList.remove('hidden');
@@ -272,6 +336,12 @@ async function loadVRM(url, characterName = '') {
 
       // Rotate model if VRM 0.x
       VRMUtils.rotateVRM0(vrm);
+
+      // 各模型世界尺寸不同，先统一头骨高度，固定相机才框得住（详见函数注释）
+      normalizeModelScale(vrm);
+
+      // 修正模型自带的「黑色占位法线贴图」导致的整体过曝（详见函数注释）
+      dropDisabledNormalMaps(vrm);
 
       // Apply natural cute posture (prevent T-pose)
       applyNaturalPose(vrm);
@@ -860,22 +930,35 @@ function ensureProceduralMotionClips(vrm) {
   }
 
   // 5. wave_hand (轻柔摆手 / 招手问候)
+  // 数值由骨骼反解实测：上臂侧伸、肘部弯约 104°、前臂竖起，手停在脸侧（约眼睛高度）
+  // 随前臂左右摆约 ±16°。两处踩过的坑：
+  //   ① 只抬上臂而不给前臂足够的肘弯，整条手臂会退化成一根水平外伸的直杆；
+  //   ② 抬得过高时手指会顶出画面（垂直取景是固定的），故按指尖(而非手腕骨)定高度。
   if (!activeMotionClips['wave_hand']) {
     const rUpperArm = h.getNormalizedBoneNode('rightUpperArm');
     const rLowerArm = h.getNormalizedBoneNode('rightLowerArm');
     if (rUpperArm && rLowerArm) {
+      const RAISED = [0.005, 0.126, -1.132];     // 上臂抬起并保持
+      const SWING_MID = [0.086, -0.150, -2.012]; // 前臂竖直居中
+      const SWING_OUT = [0.108, -0.107, -1.733]; // 前臂摆向外侧
+      const SWING_IN = [0.050, -0.186, -2.292];  // 前臂摆向内侧
       const tracks = [
-        // 右臂抬起维持在身侧上方，收尾回落
-        rotTrack(rUpperArm, [0.0, 0.35, 2.35, 2.7], [
-          [0, 0, 0], [-0.12, 0, -0.95], [-0.12, 0, -0.95], [0, 0, 0]
+        // 抬臂 → 保持 → 回落
+        rotTrack(rUpperArm, [0.0, 0.35, 2.45, 2.7], [
+          [0, 0, 0], RAISED, RAISED, [0, 0, 0]
         ]),
-        // 前臂来回摆动，形成挥手节奏
-        rotTrack(rLowerArm, [0.0, 0.5, 0.95, 1.4, 1.85, 2.3], [
-          [0, 0, 0], [-0.35, 0, 0.32], [-0.35, 0, -0.34], [-0.35, 0, 0.32], [-0.35, 0, -0.28], [0, 0, 0]
-        ])
+        // 前臂来回摆动 3 次 (0.6s 一个来回)
+        rotTrack(
+          rLowerArm,
+          [0.0, 0.35, 0.65, 0.95, 1.25, 1.55, 1.85, 2.15, 2.45, 2.7],
+          [
+            [0, 0, 0], SWING_MID, SWING_OUT, SWING_IN, SWING_OUT,
+            SWING_IN, SWING_OUT, SWING_IN, SWING_MID, [0, 0, 0]
+          ]
+        )
       ];
       if (headNode) {
-        tracks.push(rotTrack(headNode, [0.0, 0.45, 2.3, 2.7], [
+        tracks.push(rotTrack(headNode, [0.0, 0.45, 2.45, 2.7], [
           [0, 0, 0], [0.02, -0.14, 0.08], [0.02, -0.14, 0.08], [0, 0, 0]
         ]));
       }
@@ -973,6 +1056,10 @@ function playMotion(motionName) {
     if (currentMotionFinishedHandler === onFinished) currentMotionFinishedHandler = null;
     if (currentMotionAction !== action) return; // 已被新动作接管，不再干预 idle
     currentMotionAction = null;
+    // clampWhenFinished 会让动作停在最后一帧，但权重仍保持 1。不淡出的话它会一直
+    // 和 idle 混合下去，把角色姿势永久拖偏（自动打招呼尤其明显：VRMA_01 的收尾
+    // 帧并非站姿）。淡出结束时 three.js 会自动把该动作置为 disabled。
+    action.fadeOut(0.35);
     if (currentIdleAction) {
       currentIdleAction.reset().setEffectiveWeight(1.0).fadeIn(0.35).play();
     }
@@ -1006,10 +1093,6 @@ function playVoiceReaction(hitPart, characterName) {
     '雷电将军': {
       head: ['……休得无礼。', '这便是……触碰的感觉么。', '……'],
       body: ['何事？', '此身即是永恒，莫要随意动手动脚。', '雷霆之威，不可轻亵。']
-    },
-    '依蕾娜': {
-      head: ['ふふっ、美しい魔女の髪に触れたい気持ちは分かります。', 'あまり撫でると、料金をいただきますよ？'],
-      body: ['おや？旅の資金でも恵んでくださるのですか？', '急に触るのは感心しませんね。']
     }
   };
 
