@@ -72,6 +72,7 @@ conf.yaml.backup
 *.exe
 
 tmp/
+temp/
 private/
 mcp_servers.json
 
