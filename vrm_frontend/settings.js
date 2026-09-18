@@ -229,17 +229,20 @@ function renderSettingsUI(updateCharDropdown = true) {
   const fishModel = document.getElementById('fish-model');
   const fishRefId = document.getElementById('fish-reference-id');
   const fishLatency = document.getElementById('fish-latency');
+  const fishMode = document.getElementById('fish-mode');
   const fishBaseUrl = document.getElementById('fish-base-url');
   const edgeVoice = document.getElementById('edge-voice');
 
   const defFishModel = (defaults.tts && defaults.tts.model) || 's2.1-pro-free';
   const defFishRef = (defaults.tts && defaults.tts.reference_id) || '7f92f8afb8ec43bf81429cc1c9199cb1';
   const defFishLat = (defaults.tts && defaults.tts.latency) || 'balanced';
+  const defFishMode = (defaults.tts && defaults.tts.mode) || 'standard';
   const defFishBase = (defaults.tts && defaults.tts.base_url) || 'https://api.fish.audio';
 
   // —— 全局参数（来自 conf.yaml，对所有角色一致）
   if (fishModel) fishModel.value = fishCfg.model || defFishModel;
   if (fishLatency) fishLatency.value = fishCfg.latency || defFishLat;
+  if (fishMode) fishMode.value = fishCfg.mode || defFishMode;
   if (fishBaseUrl) {
     fishBaseUrl.value = fishCfg.base_url || '';
     fishBaseUrl.placeholder = `系统默认: ${defFishBase}`;
@@ -414,6 +417,9 @@ function bindFieldResetHandlers() {
           break;
         case 'fish-latency':
           input.value = (defaults.tts && defaults.tts.latency) || 'balanced';
+          break;
+        case 'fish-mode':
+          input.value = (defaults.tts && defaults.tts.mode) || 'standard';
           break;
         case 'fish-format':
           input.value = (defaults.tts && defaults.tts.format) || 'wav';
@@ -766,6 +772,7 @@ async function saveAllSettings() {
       const byId = (id) => document.getElementById(id);
       payload.tts.model = (byId('fish-model') && byId('fish-model').value) || 's2.1-pro-free';
       payload.tts.latency = (byId('fish-latency') && byId('fish-latency').value) || 'balanced';
+      payload.tts.mode = (byId('fish-mode') && byId('fish-mode').value) || 'standard';
       payload.tts.format = (byId('fish-format') && byId('fish-format').value) || 'wav';
       payload.tts.base_url =
         (byId('fish-base-url') && byId('fish-base-url').value.trim()) || 'https://api.fish.audio';

@@ -371,6 +371,9 @@ character_config:
       # 'normal' 或 'balanced'。balanced 更快但质量较低。
       latency: 'balanced' # 延迟
       base_url: 'https://api.fish.audio' # 基础 URL
+      # 'standard' 每句新建连接（原行为）；'optimized' 复用长连接，省去每句约 200ms 的 TLS 握手。
+      # 两种模式都是每句一次合成请求，音频下发方式相同。
+      mode: 'standard' # 合成模式
 
     coqui_tts:
       # 要使用的 TTS 模型的名称。如果为空，将使用默认模型

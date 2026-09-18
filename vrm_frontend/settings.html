@@ -216,6 +216,18 @@
 
                 <div class="form-group">
                   <div class="form-label-row">
+                    <label>合成模式 (Mode)</label>
+                    <button type="button" class="btn-field-reset" data-reset="fish-mode" title="恢复默认合成模式">↺ 恢复默认</button>
+                  </div>
+                  <select id="fish-mode" class="form-control">
+                    <option value="standard">标准模式（每句独立建连，与原逻辑完全一致）</option>
+                    <option value="optimized">优化模式（复用长连接，省去每句约 200ms 的 TLS 握手）</option>
+                  </select>
+                  <span class="form-hint">两种模式都是<strong>每句一次合成请求</strong>，音频下发方式也完全相同；区别只在于是否复用 HTTPS 长连接。</span>
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
                     <label>输出格式 (Format)</label>
                     <button type="button" class="btn-field-reset" data-reset="fish-format" title="恢复默认格式">↺ 恢复默认</button>
                   </div>

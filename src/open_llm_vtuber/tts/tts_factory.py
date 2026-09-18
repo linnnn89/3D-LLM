@@ -22,6 +22,7 @@ class TTSFactory:
                 temperature=kwargs.get("temperature", 0.7),
                 top_p=kwargs.get("top_p", 0.7),
                 speed=kwargs.get("speed", 1.0),
+                mode=kwargs.get("mode", "standard"),
             )
         elif engine_type == "edge_tts":
             from .edge_tts import TTSEngine as EdgeTTSEngine

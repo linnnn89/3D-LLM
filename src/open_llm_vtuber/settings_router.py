@@ -83,6 +83,7 @@ PRESET_TTS_PROVIDERS = [
         "models": ["s2.1-pro-free", "s2.1-pro", "s2-pro", "s1", "drama-3-preview"],
         "latency": "balanced",
         "formats": ["wav", "mp3"],
+        "modes": ["standard", "optimized"],
         "default_reference_id": "7f92f8afb8ec43bf81429cc1c9199cb1",
         "docs": "https://docs.fish.audio",
     },
@@ -117,6 +118,8 @@ SYSTEM_DEFAULTS = {
         "temperature": 0.7,
         "top_p": 0.7,
         "speed": 1.0,
+        # 合成模式：standard=每句新建连接（原行为）；optimized=复用长连接
+        "mode": "standard",
     },
     # Single source of truth: the memory subsystem reads the same defaults
     "memory": dict(DEFAULT_MEMORY_SETTINGS),
@@ -501,6 +504,7 @@ def init_settings_routes(default_context_cache: ServiceContext) -> APIRouter:
                         "temperature",
                         "top_p",
                         "speed",
+                        "mode",
                     ):
                         v = tts_in.get(key)
                         if v is None or v == "":
@@ -639,6 +643,7 @@ def init_settings_routes(default_context_cache: ServiceContext) -> APIRouter:
                             "temperature",
                             "top_p",
                             "speed",
+                            "mode",
                             "api_key",
                         ):
                             f_cfg.pop(legacy, None)

@@ -324,6 +324,9 @@ class FishAPITTSConfig(I18nMixin):
     top_p: float = Field(0.7, alias="top_p")
     # 语速（prosody.speed）
     speed: float = Field(1.0, alias="speed")
+    # 合成模式。standard = 每句新建连接（原有行为）；
+    # optimized = 复用常驻长连接，省去每句约 200ms 的 TCP+TLS 握手。
+    mode: Literal["standard", "optimized"] = Field("standard", alias="mode")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "api_key": Description(
@@ -356,6 +359,10 @@ class FishAPITTSConfig(I18nMixin):
             en="Nucleus sampling threshold (0-1)", zh="核采样阈值（0-1）"
         ),
         "speed": Description(en="Speech speed multiplier", zh="语速倍率"),
+        "mode": Description(
+            en="Synthesis mode: standard (new connection per request) or optimized (reuse a keep-alive connection)",
+            zh="合成模式：standard（每句新建连接）或 optimized（复用长连接）",
+        ),
     }
 
 

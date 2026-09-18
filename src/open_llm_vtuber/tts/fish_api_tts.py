@@ -15,6 +15,7 @@ REST 直连则完全可控，且能把 Fish 的原始拒绝原因透出来。
 """
 
 import json
+import threading
 from typing import Literal
 
 import httpx
@@ -33,6 +34,51 @@ REQUEST_TIMEOUT = 120.0
 
 # 连通性探测用的默认音色：/v1/tts 允许不带 reference_id
 DEFAULT_PROBE_VOICE = "35c8e5ae5239435f8d9c26c86802b86d"
+
+# ---------------------------------------------------------------- 长连接复用
+#
+# 优化模式的核心。实测（国内走代理，Fish 官方端点）：
+#   每次新建 client  TTFB 800 / 563 / 701 ms
+#   复用同一 client  TTFB 611 / 491 / 359 ms
+# 差额约 200ms 就是重复的 TCP+TLS 握手——而这笔开销是**每句话**都要付的。
+#
+# httpx.Client 官方明确说明是线程安全的，可以在多线程之间共享
+# （generate_audio 由 asyncio.to_thread 调度到工作线程执行）。
+_shared_client: "httpx.Client | None" = None
+_shared_client_lock = threading.Lock()
+
+
+def _get_shared_client() -> httpx.Client:
+    """返回全局共享的 httpx.Client（懒加载，连接池常驻）。"""
+    global _shared_client
+    if _shared_client is None:
+        with _shared_client_lock:
+            if _shared_client is None:
+                _shared_client = httpx.Client(
+                    timeout=REQUEST_TIMEOUT,
+                    follow_redirects=False,
+                    # 会话保活久一点，避免两轮对话间隔稍长就退化成重新握手
+                    limits=httpx.Limits(keepalive_expiry=60.0),
+                )
+    return _shared_client
+
+
+def _reset_shared_client() -> None:
+    """丢弃当前共享 client，下次请求会重建连接池。
+
+    长连接被服务端或中间代理静默掐断时，池子里会留下已经死掉的连接。
+    httpx 对 POST 不会自动重试，这一句就会直接失败；丢弃重建即可恢复。
+
+    顺带：新建 client 会重新读取一次环境变量里的代理设置。
+    """
+    global _shared_client
+    with _shared_client_lock:
+        old, _shared_client = _shared_client, None
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
 
 
 def _fish_detail(raw: str) -> str:
@@ -88,6 +134,7 @@ class TTSEngine(TTSInterface):
         temperature: float = 0.7,
         top_p: float = 0.7,
         speed: float = 1.0,
+        mode: Literal["standard", "optimized"] = "standard",
     ):
         # 未显式提供密钥时，从 Windows DPAPI 密钥库取
         if not api_key or api_key in ("KEY_VAULT", "default_api_key"):
@@ -112,6 +159,7 @@ class TTSEngine(TTSInterface):
         self.temperature = temperature
         self.top_p = top_p
         self.speed = speed
+        self.mode = mode
 
         # 端点：允许 base_url 指向自建/镜像，默认走官方
         endpoint = (base_url or "").strip().rstrip("/")
@@ -128,7 +176,7 @@ class TTSEngine(TTSInterface):
         logger.info(
             f"\nFish TTS 初始化（REST 直连）endpoint: {self.endpoint}, model: {model}, "
             f"reference_id: {reference_id}, latency: {latency}, format: {format}, "
-            f"temperature: {temperature}, top_p: {top_p}, speed: {speed}, "
+            f"mode: {mode}, temperature: {temperature}, top_p: {top_p}, speed: {speed}, "
             f"api_key: {'已配置' if api_key else '缺失'}"
         )
 
@@ -166,10 +214,24 @@ class TTSEngine(TTSInterface):
             "model": self.model,
         }
 
-        try:
-            with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=False) as client:
+        # 优化模式复用常驻连接池；标准模式每次新建（与原逻辑完全一致）。
+        # 长连接可能被服务端或中间代理静默掐断，而 httpx 对 POST 不会自动重试，
+        # 于是那一句会直接失败。所以优化模式下失败时丢弃连接池、重建后再试一次。
+        payload = self._build_payload(text)
+        attempts = 2 if self.mode == "optimized" else 1
+
+        for attempt in range(attempts):
+            owns_client = self.mode != "optimized"
+            client = None
+
+            try:
+                client = (
+                    httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=False)
+                    if owns_client
+                    else _get_shared_client()
+                )
                 with client.stream(
-                    "POST", self.endpoint, headers=headers, json=self._build_payload(text)
+                    "POST", self.endpoint, headers=headers, json=payload
                 ) as resp:
                     if resp.status_code != 200:
                         raw = resp.read().decode("utf-8", errors="replace")
@@ -208,15 +270,28 @@ class TTSEngine(TTSInterface):
                         logger.critical("\nFish TTS 合成失败: Fish 返回了空音频")
                         return None
 
-            return file_name
+                return file_name
 
-        except httpx.TimeoutException:
-            logger.critical(f"\nFish TTS 合成失败: 请求超过 {int(REQUEST_TIMEOUT)} 秒未完成，请缩短文本或稍后重试")
-            return None
-        except Exception as e:
-            raw = str(e)
-            logger.critical(
-                f"\nFish TTS 合成失败: {raw[:200]}"
-                "（若为连接/SSL 错误，通常是代理问题：Fish Audio 在国内需要可用的代理）"
-            )
-            return None
+            except httpx.TimeoutException:
+                logger.critical(f"\nFish TTS 合成失败: 请求超过 {int(REQUEST_TIMEOUT)} 秒未完成，请缩短文本或稍后重试")
+                return None
+            except Exception as e:
+                if attempt + 1 < attempts:
+                    logger.warning(
+                        f"\nFish TTS: 请求失败（{str(e)[:120]}），"
+                        "疑似长连接已被对端关闭，丢弃连接池后重试一次"
+                    )
+                    _reset_shared_client()
+                    continue
+                raw = str(e)
+                logger.critical(
+                    f"\nFish TTS 合成失败: {raw[:200]}"
+                    "（若为连接/SSL 错误，通常是代理问题：Fish Audio 在国内需要可用的代理）"
+                )
+                return None
+            finally:
+                # 共享连接要留给后面的句子复用，只有自己建的 client 才关
+                if owns_client and client is not None:
+                    client.close()
+
+        return None

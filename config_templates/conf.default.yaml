@@ -363,6 +363,10 @@ character_config:
       # Either 'normal' or 'balanced'. balance is faster but lower quality.
       latency: 'balanced'
       base_url: 'https://api.fish.audio'
+      # 'standard': a new connection per request (original behavior).
+      # 'optimized': reuse a keep-alive connection, skipping the per-sentence TLS handshake (~200ms).
+      # Both modes issue exactly one synthesis request per sentence.
+      mode: 'standard'
 
     coqui_tts:
       # Name of the TTS model to use. If empty, will use default model
