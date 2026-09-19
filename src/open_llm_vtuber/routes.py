@@ -12,6 +12,17 @@ from .websocket_handler import WebSocketHandler
 from .proxy_handler import ProxyHandler
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 客户端 WebSocket 路由枢纽 (Client WebSocket Route)
+# -----------------------------------------------------------------------------
+# 角色职责: 前端浏览器/客户端建立双向长连接通信的总入口点 (/client-ws)。
+# 核心生命周期流转:
+#   1. websocket.accept(): 握手通过；
+#   2. 生成 client_uid (UUID4): 唯一标识该连接客户端；
+#   3. ws_handler.handle_new_connection: 初始化会话专有 ServiceContext 并下发初始配置；
+#   4. ws_handler.handle_websocket_communication: 启动持续长轮询接收与协议分发循环；
+#   5. 级联收尾: 无论是正常 WebSocketDisconnect 还是未捕获异常，均调用 ws_handler.handle_disconnect 进行强力清理。
+# =============================================================================
 def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
     """
     Create and return API routes for handling the `/client-ws` WebSocket connections.
@@ -33,11 +44,15 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
         client_uid = str(uuid4())
 
         try:
+            # [生命周期] 1. 建立会话上下文并绑定连接
             await ws_handler.handle_new_connection(websocket, client_uid)
+            # [调度主循环] 2. 进入持续消息侦听与转发主循环 (阻断直到断开)
             await ws_handler.handle_websocket_communication(websocket, client_uid)
         except WebSocketDisconnect:
+            # [高危退出清理] 正常断开清理
             await ws_handler.handle_disconnect(client_uid)
         except Exception as e:
+            # [高危退出清理] 异常崩溃级联清理
             logger.error(f"Error in WebSocket connection: {e}")
             await ws_handler.handle_disconnect(client_uid)
             raise
@@ -45,6 +60,11 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
     return router
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 多路复用代理路由 (Proxy Route)
+# -----------------------------------------------------------------------------
+# 角色职责: 当多个外部平台/桌宠端需要连接单实例时，提供单信道汇聚转发 (/proxy-ws)。
+# =============================================================================
 def init_proxy_route(server_url: str) -> APIRouter:
     """
     Create and return API routes for handling proxy connections.

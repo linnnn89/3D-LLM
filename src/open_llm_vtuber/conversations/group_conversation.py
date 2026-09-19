@@ -26,6 +26,17 @@ from ..chat_history_manager import store_message
 from .tts_manager import TTSTaskManager
 
 
+# =============================================================================
+# [架构导航 / 核心流水线] 多角色协同群聊流水线 (Group Conversation Pipeline)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   管理一个房间内多个虚拟角色（或多客户端）面对同一用户输入的轮流协同发言状态机。
+# 核心协同机制:
+#   1. 并发管理器独立化: 为每个群成员创建专属的 TTSTaskManager 实例 (tts_managers)；
+#   2. 轮转发言队列 (state.group_queue): 将成员加入排队队列，逐一调用 handle_group_member_turn 发言；
+#   3. 全局状态广播 (broadcast_func): 每次产生句子或音频时，全量广播给房间内所有客户端同步渲染；
+#   4. 共享上下文与打断: 任何成员的打断或断线会触发全组截断并清空 group_queue。
+# =============================================================================
 async def process_group_conversation(
     client_contexts: Dict[str, ServiceContext],
     client_connections: Dict[str, WebSocket],

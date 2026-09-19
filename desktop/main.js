@@ -48,6 +48,7 @@ const SIZE_PRESETS = {
 
 const NO_BACKEND = process.argv.includes('--no-backend')
 const RUN_RESIZE_TEST = process.argv.includes('--resize-test')
+const FULL_UI = process.argv.includes('--full-ui')
 
 // 取景档位：通过「合成滚轮事件」让页面自己的 OrbitControls 拉远相机。
 // 这样无需访问 app.js 的模块作用域变量，也不必修改 vrm_frontend/ 源码。
@@ -415,6 +416,10 @@ function exitResizeMode(commit, rect) {
 // ---------------------------------------------------------------- 窗口
 
 function loadOverlayCss() {
+  if (FULL_UI) {
+    overlayCss = ''
+    return
+  }
   try {
     overlayCss = fs.readFileSync(path.join(__dirname, 'pet-overlay.css'), 'utf8')
   } catch (error) {
@@ -434,31 +439,31 @@ function createAvatarWindow() {
   // 优先用上次保存的尺寸/位置；没保存过或已不在任何显示器工作区内则回落默认
   const saved = restoreSavedBounds()
   const preset = SIZE_PRESETS[currentSize] || SIZE_PRESETS.medium
-  const width = saved ? saved.width : preset.width
-  const height = saved ? saved.height : preset.height
+  const width = FULL_UI ? 1280 : (saved ? saved.width : preset.width)
+  const height = FULL_UI ? 800 : (saved ? saved.height : preset.height)
   const fallback = defaultPosition(width, height)
-  const x = saved ? saved.x : fallback.x
-  const y = saved ? saved.y : fallback.y
+  const x = FULL_UI ? undefined : (saved ? saved.x : fallback.x)
+  const y = FULL_UI ? undefined : (saved ? saved.y : fallback.y)
 
   avatarWindow = new BrowserWindow({
     width,
     height,
-    x,
-    y,
-    // —— 桌宠窗口参数（设计文档 §2.1 / §11.1）——
-    transparent: true,
-    frame: false,
-    hasShadow: false,
-    resizable: false, // 保透明：不添加 WS_THICKFRAME
-    thickFrame: false, // 双保险；顺带去掉阴影与窗口动画
-    focusable: false, // Windows 上映射为 WS_EX_NOACTIVATE
-    skipTaskbar: true,
-    alwaysOnTop: true,
+    center: Boolean(FULL_UI),
+    ...(x !== undefined && y !== undefined && !FULL_UI ? { x, y } : {}),
+    // —— 窗口参数 ——
+    transparent: !FULL_UI,
+    frame: Boolean(FULL_UI),
+    hasShadow: true,
+    resizable: true,
+    thickFrame: true,
+    focusable: true,
+    skipTaskbar: false,
+    alwaysOnTop: false,
     fullscreenable: false,
-    maximizable: false,
-    minimizable: false,
+    maximizable: true,
+    minimizable: true,
     autoHideMenuBar: true,
-    show: false,
+    show: Boolean(FULL_UI),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -468,7 +473,9 @@ function createAvatarWindow() {
     }
   })
 
-  avatarWindow.setAlwaysOnTop(true, 'screen-saver')
+  if (!FULL_UI) {
+    avatarWindow.setAlwaysOnTop(true, 'screen-saver')
+  }
 
   // 重置穿透状态：新窗口先整窗可交互，等确认 forward 转发可用后，
   // 才会切到「只有角色挡住鼠标」。这样最坏情况也只是回到旧行为，不会把角色点不动。
@@ -858,6 +865,7 @@ function popupAvatarMenu() {
  * 形成死锁（鼠标永远无法把角色变回可交互）。
  */
 function applyIgnoreMouseEvents(ignore) {
+  if (FULL_UI) return
   if (!avatarWindow || avatarWindow.isDestroyed()) return
   try {
     if (ignore) {
@@ -872,6 +880,7 @@ function applyIgnoreMouseEvents(ignore) {
 
 /** 恢复到「透明区域穿透」的默认状态 */
 function restoreClickThrough(reason) {
+  if (FULL_UI) return
   isInteractive = false
   leaveTicks = 0
   applyIgnoreMouseEvents(true)
@@ -879,6 +888,7 @@ function restoreClickThrough(reason) {
 }
 
 function onHoverState(hovering) {
+  if (FULL_UI) return
   if (!avatarWindow || avatarWindow.isDestroyed()) return
   if (!clickThroughEnabled) return
   if (dragState) return // 拖动过程中不要切换穿透，否则会把拖动打断
@@ -918,6 +928,7 @@ function onHoverState(hovering) {
 
 /** 托盘开关：关闭时整窗恢复可交互（诊断用 / 用户偏好） */
 function setClickThroughEnabled(enabled) {
+  if (FULL_UI) return
   clickThroughEnabled = enabled
   log(`[hit] 点击穿透 ${enabled ? '已开启' : '已关闭'}`)
   if (!enabled) {
@@ -938,6 +949,7 @@ ipcMain.on('avatar:log', (_event, message) => log(String(message)))
 ipcMain.on('avatar:hover-state', (_event, hovering) => onHoverState(Boolean(hovering)))
 
 ipcMain.on('avatar:pointer-alive', () => {
+  if (FULL_UI) return
   if (pointerAlive) return
   pointerAlive = true
   log('[hit] 已确认 mouse move 转发可用（focusable:false 下鼠标事件可达）→ 启用点击穿透')

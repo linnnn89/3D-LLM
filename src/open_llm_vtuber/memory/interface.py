@@ -33,6 +33,19 @@ def _default_character_info(character_id: str) -> Dict[str, str]:
     }
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 长程记忆子系统统一门面 (Memory Subsystem Facade)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   向外提供长程记忆的统一门面接口，解耦上层对话流水线与底层 SQLite FTS5 / LLM 提炼服务。
+# 核心机制:
+#   1. 双路提示词注入 (get_prompt_injection):
+#      - 静态基石: 角色长期记忆银行 MemoryBank (存储长期事实、用户画像、核心关系)；
+#      - 动态召回: 基于 SQLite FTS5 Trigram 全文索引，根据当前 user_text 检索高相关度历史对话片段。
+#   2. 异步摄入与自动提炼 (record_turn):
+#      - 每轮对话结束时，将成对对话轮次摄入 SQLite；
+#      - 当积累轮次达到阈值时，自动触发后台异步 LLM 记忆提炼与银行更新任务。
+# =============================================================================
 class MemoryInterface:
     """
     Public Facade Interface for the Open-LLM-VTuber Memory System.
@@ -74,6 +87,12 @@ class MemoryInterface:
         self.settings = settings
         self.service.settings = settings
 
+    # =========================================================================
+    # [架构节点 / 记忆召回] 提取静态 MemoryBank 与动态 FTS5 BM25 检索历史
+    # 上游调用: single_conversation.py -> process_single_conversation (阶段 3)
+    # 下游返回: (memory_bank_text, recalled_history_prompt_text)
+    # 注入方式: 组合后填入 BatchInput.metadata["memory_context"]，提示词层面注入
+    # =========================================================================
     def get_prompt_injection(
         self,
         character_id: str,
@@ -115,6 +134,11 @@ class MemoryInterface:
 
         return memory_bank_text, recalled_snippets_text
 
+    # =========================================================================
+    # [架构节点 / 轮次索引] 摄入完整成对对话轮次并通知提炼调度器
+    # 上游调用: single_conversation.py -> process_single_conversation (阶段 8)
+    # 下游联动: repository.index_turn -> service.notify_new_turn (达到批次阈值时异步提炼)
+    # =========================================================================
     def record_turn(
         self,
         character_id: str,

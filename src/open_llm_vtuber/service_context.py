@@ -39,6 +39,23 @@ from .config_manager import (
 )
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 服务上下文与依赖注入中心 (ServiceContext)
+# -----------------------------------------------------------------------------
+# 角色职责: 全系统核心引擎容器与依赖注入（DI）枢纽。
+# 管理组件:
+#   - 基础感知与动作: Live2dModel, ASRInterface, TTSInterface, VADInterface
+#   - 智能与翻译: AgentInterface (LLM), TranslateInterface
+#   - 工具与外部生态: MCP 客户端体系 (ServerRegistry, ToolAdapter, ToolManager, ToolExecutor)
+#   - 持久记忆: Long-term memory subsystem (MemoryInterface, 跨会话共享)
+# 生命周期与分身模式 (Prototype & Session Clone):
+#   1. 全局原型 (default_context_cache): 由 run_server -> server.initialize 装载常驻内存；
+#   2. 会话副本 (session_service_context): 客户端连接时通过 load_cache 引用共享重度模型，
+#      同时独立维护当前连接专享的 send_text, client_uid, history_uid 及 MCP Client。
+# 高危注意:
+#   - 动态热重载必须走 load_from_config 比对配置 diff，避免重复初始化大模型导致显存泄漏。
+#   - 会话断开时必须调用 close() 释放 MCPClient 及后台子进程。
+# =============================================================================
 class ServiceContext:
     """Initializes, stores, and updates the asr, tts, and llm instances and other
     configurations for a connected client."""
@@ -191,8 +208,13 @@ class ServiceContext:
                 "MCP components not initialized (use_mcpp is False or no enabled servers)."
             )
 
+    # =========================================================================
+    # [生命周期与清理] 会话销毁资源回收
+    # 上游调用: websocket_handler.py -> handle_disconnect(client_uid)
+    # 核心职责: 关闭本会话的 MCPClient 连接与 Agent 内部异步资源，防止子进程与网络僵死
+    # =========================================================================
     async def close(self):
-        """Clean up resources, especially the MCPClient."""
+        """Close resources associated with this service context."""
         logger.info("Closing ServiceContext resources...")
         if self.mcp_client:
             logger.info(f"Closing MCPClient for context instance {id(self)}...")
@@ -202,6 +224,14 @@ class ServiceContext:
             await self.agent_engine.close()  # Ensure agent resources are also closed
         logger.info("ServiceContext closed.")
 
+    # =========================================================================
+    # [架构节点 / 会话分身] 从全局原型轻量克隆会话上下文
+    # 上游调用: websocket_handler.py -> _init_service_context
+    # 核心设计:
+    #   - 传入全局共享的 ASR/TTS/Agent/Live2D 引擎实例引用（零重复载入开销）
+    #   - 独立绑定当前连接的 send_text 与 client_uid
+    #   - 为该会话独立初始化专属的 MCP 组件链 (_init_mcp_components)
+    # =========================================================================
     async def load_cache(
         self,
         config: Config,
@@ -250,6 +280,15 @@ class ServiceContext:
 
         logger.debug(f"Loaded service context with cache: {character_config}")
 
+    # =========================================================================
+    # [架构节点 / 配置热重载] 全量/增量差异化重载引擎
+    # 上游调用:
+    #   - 服务启动: server.initialize -> default_context_cache.load_from_config
+    #   - 运行时切配置: settings_router.py / websocket_handler.py -> handle_config_switch
+    # 核心设计:
+    #   - 检查子配置是否变动，仅当配置变更时才触发对应 Factory 重新实例化
+    #   - 未变更的引擎保持原有实例，防止重载时发生显存/内存溢出
+    # =========================================================================
     async def load_from_config(self, config: Config) -> None:
         """
         Load the ServiceContext with the config.
@@ -551,6 +590,10 @@ class ServiceContext:
                 "时崎狂三": "zh_tokisaki_kurumi_01.yaml",
                 "zh_坎特蕾拉.yaml": "zh_cantarella_01.yaml",
                 "坎特蕾拉": "zh_cantarella_01.yaml",
+                "zh_坎特蕾拉（PMX）.yaml": "zh_cantarella_pmx_01.yaml",
+                "zh_坎特蕾拉(PMX).yaml": "zh_cantarella_pmx_01.yaml",
+                "坎特蕾拉（PMX）": "zh_cantarella_pmx_01.yaml",
+                "坎特蕾拉(PMX)": "zh_cantarella_pmx_01.yaml",
                 "zh_弗洛洛.yaml": "zh_phrolova_01.yaml",
                 "弗洛洛": "zh_phrolova_01.yaml",
             }

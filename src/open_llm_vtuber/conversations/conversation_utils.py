@@ -16,7 +16,15 @@ from ..tts.tts_interface import TTSInterface
 from ..utils.stream_audio import prepare_audio_payload
 
 
-# Convert class methods to standalone functions
+# =============================================================================
+# [架构导航 / 辅助节点] 对话数据转换与多模态输出处理器 (Conversation Utils)
+# =============================================================================
+
+# =============================================================================
+# [数据装配] 构建统一 Agent 批次输入模型
+# 上游调用: single_conversation.py / group_conversation.py
+# 核心数据: 文本、多模态图片 Base64、以及长程记忆元数据 (metadata["memory_context"])
+# =============================================================================
 def create_batch_input(
     input_text: str,
     images: Optional[List[Dict[str, Any]]],
@@ -42,6 +50,13 @@ def create_batch_input(
     )
 
 
+# =============================================================================
+# [架构分流 / 多模态输出路由] Agent 输出解析与 TTS/音频派发
+# -----------------------------------------------------------------------------
+# 分流逻辑:
+#   - SentenceOutput: 文本分句对象 -> handle_sentence_output (可选翻译 -> tts_manager.speak)
+#   - AudioOutput: 端到端音频对象 (如 Hume AI / 语音大模型) -> handle_audio_output 直送
+# =============================================================================
 async def process_agent_output(
     output: Union[AudioOutput, SentenceOutput],
     character_config: Any,

@@ -171,12 +171,14 @@ body, html {
    而选项文字继承 .btn-icon 的 color:#fff —— 白字白底，选项完全看不见。
    这里必须给 option 显式上色；color-scheme:dark 让弹层边框/滚动条也走暗色。 */
 #config-select,
-#motion-select {
+#motion-select,
+#emotion-select {
   color-scheme: dark;
 }
 
 #config-select option,
-#motion-select option {
+#motion-select option,
+#emotion-select option {
   background-color: #17152b;
   color: #fff;
 }

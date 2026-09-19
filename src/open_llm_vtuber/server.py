@@ -63,6 +63,22 @@ class AvatarStaticFiles(CORSStaticFiles):
         return response
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 基础服务装配器与路由聚合中心 (WebSocketServer)
+# -----------------------------------------------------------------------------
+# 角色职责: 构建 FastAPI 实例，注册所有 API 路由、WebSocket 端点及静态资产挂载。
+# 核心架构关系:
+#   1. 维持 default_context_cache 单例作为会话的原型模板（Prototype Cache）；
+#   2. 路由分发：
+#      - /client-ws -> init_client_ws_route (主客户端长连接)
+#      - /web-tool  -> init_webtool_routes (前端配置与模型选择工具)
+#      - /settings  -> init_settings_routes (配置持久化与热更新)
+#      - /proxy-ws  -> init_proxy_route (多客户端/桌宠单信道多路复用)
+#   3. 静态资产托管：按特定优先级挂载缓存与模型资源（最后挂载 / 兜底前端）。
+# 高危注意:
+#   - 静态目录挂载顺序敏感：/ 必须最后 mount，否则会遮蔽其他特定前缀路径。
+#   - default_context_cache 必须在应用监听端口前通过 initialize() 加载完成。
+# =============================================================================
 class WebSocketServer:
     """
     API server for Open-LLM-VTuber. This contains the websocket endpoint for the client, hosts the web tool, and serves static files.
@@ -98,8 +114,7 @@ class WebSocketServer:
             allow_headers=["*"],
         )
 
-        # Include routes, passing the context instance
-        # The context will be populated during the initialize step
+        # [路由注册交叉点] 注入 default_context_cache 作为会话原型的共享引用源
         self.app.include_router(
             init_client_ws_route(default_context_cache=self.default_context_cache),
         )
@@ -110,7 +125,7 @@ class WebSocketServer:
             init_settings_routes(default_context_cache=self.default_context_cache),
         )
 
-        # Initialize and include proxy routes if proxy is enabled
+        # [代理多路复用路由] 当开启 enable_proxy 时向同一端口内的 /client-ws 建立内部转发桥
         system_config = config.system_config
         if hasattr(system_config, "enable_proxy") and system_config.enable_proxy:
             # Construct the server URL for the proxy
@@ -195,11 +210,21 @@ class WebSocketServer:
             name="frontend",
         )
 
+    # =========================================================================
+    # [架构节点 / 依赖预热] 异步装载全局服务上下文原型
+    # 上游调用: run_server.py -> asyncio.run(server.initialize())
+    # 下游流向: default_context_cache.load_from_config(self.config)
+    # =========================================================================
     async def initialize(self):
         """Asynchronously load the service context from config.
         Calling this function is needed if default_context_cache was not provided to the constructor."""
         await self.default_context_cache.load_from_config(self.config)
 
+    # =========================================================================
+    # [生命周期清理] 缓存目录清空与重建
+    # 上游调用: run_server.py -> atexit.register(WebSocketServer.clean_cache)
+    # 影响范围: cache 目录下所有由 TTS 阶段落盘的临时音频分块
+    # =========================================================================
     @staticmethod
     def clean_cache():
         """Clean the cache directory by removing and recreating it."""

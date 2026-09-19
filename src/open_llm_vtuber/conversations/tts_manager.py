@@ -13,6 +13,22 @@ from ..utils.stream_audio import prepare_audio_payload
 from .types import WebSocketSend
 
 
+# =============================================================================
+# [架构导航 / 核心高危节点] 并发 TTS 合成与保序发射管理器 (TTSTaskManager)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   解决「多句音频并发合成以降低首字首句延迟」与「前端播放必须严格按语序先后」之间的并发保序矛盾。
+# 并发保序状态机机制:
+#   1. 单调发号器 (_sequence_counter): 每拆出一个句子，同步分配自增 sequence_number (0, 1, 2...);
+#   2. 并发生成池 (task_list / _process_tts): 多个异步协程并发调用 TTS 引擎合成语音（短句可能先于长句完成）;
+#   3. 保序重组队列 (_payload_queue & _process_payload_queue):
+#      - 内部维护 _next_sequence_to_send 与 buffered_payloads 乱序缓存字典；
+#      - 消费者循环只有在拿到当前期望编号 (_next_sequence_to_send) 时才向 WebSocket 弹出并递增序号；
+#      - 若后续句子先合成完成，先存入 buffered_payloads 等待前序句子就绪。
+# 高危注意:
+#   - 标点或空文本也必须占用有效序号并通过 _send_silent_payload 发射静音帧，否则序号链断裂会导致后续所有音频死锁等待！
+#   - 本轮对话被打断取消时，_sender_task 会捕获 CancelledError 优雅退出。
+# =============================================================================
 class TTSTaskManager:
     """Manages TTS tasks and ensures ordered delivery to frontend while allowing parallel TTS generation"""
 
@@ -27,6 +43,9 @@ class TTSTaskManager:
         self._sequence_counter = 0
         self._next_sequence_to_send = 0
 
+    # =========================================================================
+    # [并发入口] 句子合成排队并申请序列号
+    # =========================================================================
     async def speak(
         self,
         tts_text: str,
@@ -89,6 +108,14 @@ class TTSTaskManager:
         )
         self.task_list.append(task)
 
+    # =========================================================================
+    # [核心保序消费循环] 消费者循环：保证 WebSocket 发送顺序严格与文本语序相同
+    # -------------------------------------------------------------------------
+    # 机制:
+    #   - 即使短句先完成并放入 _payload_queue，也会暂存在 buffered_payloads 字典中；
+    #   - 只有当 _next_sequence_to_send 匹配时才从缓存字典弹出并发送给前端；
+    #   - 循环弹出所有连续就绪的后续包，保持极低延迟。
+    # =========================================================================
     async def _process_payload_queue(self, websocket_send: WebSocketSend) -> None:
         """
         Process and send payloads in correct order.
@@ -102,7 +129,7 @@ class TTSTaskManager:
                 payload, sequence_number = await self._payload_queue.get()
                 buffered_payloads[sequence_number] = payload
 
-                # Send payloads in order
+                # [高危连续出队] 只要下一个序号已在缓存中，立即连续发送
                 while self._next_sequence_to_send in buffered_payloads:
                     next_payload = buffered_payloads.pop(self._next_sequence_to_send)
                     await websocket_send(json.dumps(next_payload))

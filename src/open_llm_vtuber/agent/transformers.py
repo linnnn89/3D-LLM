@@ -1,3 +1,19 @@
+# =============================================================================
+# [架构导航 / 核心流水线] LLM 输出流式转换装饰器链 (Agent Stream Transformers)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   将大语言模型（LLM）吐出的原始 Token 字符流逐级转换为可供前端渲染与 TTS 播放的富数据结构。
+# 管道级联顺序 (执行从内到外，外层包裹内层):
+#   Token流 (LLM)
+#     ↓ [1. sentence_divider]: 累积字符按标点/pysbd分句，识别标签状态 (SentenceWithTags)
+#     ↓ [2. actions_extractor]: 从句子提取情绪关键词并解析为 Live2D 动作 (Actions)
+#     ↓ [3. display_processor]: 剥离 [joy] 等情绪标签，构建前端字幕对象 (DisplayText)
+#     ↓ [4. tts_filter]: 过滤特殊符号/括号，跳过 think 标签，封装为最终 (SentenceOutput)
+# 高危注意:
+#   - 字典透传原则: 管道全程必须无条件透传 isinstance(item, dict)（如 tool_call_status），
+#     绝不可将其误当作字符串处理或吞没，否则 MCP 工具状态将无法送达前端。
+# =============================================================================
+
 import re
 from typing import AsyncIterator, Tuple, Callable, List, Union, Dict, Any
 from functools import wraps
@@ -14,6 +30,9 @@ from loguru import logger
 _EMOTION_TAG_RE = re.compile(r"\[\s*[A-Za-z_][A-Za-z0-9_]{0,19}\s*\]")
 
 
+# =============================================================================
+# [管道阶段 1] 句子切分与标签状态追踪 (Sentence Divider)
+# =============================================================================
 def sentence_divider(
     faster_first_response: bool = True,
     segment_method: str = "pysbd",
@@ -60,6 +79,11 @@ def sentence_divider(
     return decorator
 
 
+# =============================================================================
+# [管道阶段 2] 动作与情绪表情提取器 (Actions Extractor)
+# -----------------------------------------------------------------------------
+# 核心职责: 识别文本中的情绪标签，通过 live2d_model.extract_emotion 匹配并生成 Actions.expressions
+# =============================================================================
 def actions_extractor(live2d_model: Live2dModel):
     """
     Decorator that extracts actions from sentences, passing through dicts.
@@ -105,6 +129,13 @@ def actions_extractor(live2d_model: Live2dModel):
     return decorator
 
 
+# =============================================================================
+# [管道阶段 3] 前端显示文本清洗处理器 (Display Processor)
+# -----------------------------------------------------------------------------
+# 核心职责:
+#   - 剥离正文中嵌入的情绪标记（如 [joy]），防止元数据污染聊天界面字幕；
+#   - 构造供前端显示的 DisplayText 对象。
+# =============================================================================
 def display_processor(live2d_model: Live2dModel | None = None):
     """
     Decorator that processes text for display, passing through dicts.
@@ -191,6 +222,14 @@ def display_processor(live2d_model: Live2dModel | None = None):
     return decorator
 
 
+# =============================================================================
+# [管道阶段 4] TTS 音频预处理与 SentenceOutput 封装器 (TTS Filter)
+# -----------------------------------------------------------------------------
+# 核心职责:
+#   - 过滤发音障碍符号（括号、特殊标点）；
+#   - 彻底跳过 <think> 思考标签内容的朗读（tts 置空，仅保留显示）；
+#   - 组装 SentenceOutput(display_text, tts_text, actions) 投递给下游。
+# =============================================================================
 def tts_filter(
     tts_preprocessor_config: TTSPreprocessorConfig = None,
 ):

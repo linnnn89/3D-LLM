@@ -10,6 +10,18 @@ from starlette.websockets import WebSocketDisconnect
 from .proxy_message_queue import ProxyMessageQueue
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 单信道多路复用代理中枢 (ProxyHandler)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   允许外部多个客户端（如桌面桌宠程序、B站/直播间弹幕监听器、网页调试台）
+#   通过单一的 WebSocket 连接挂载到 VTuber 主服务 (/client-ws)。
+# 核心通信回路:
+#   外部多客户端 (clients) <==> ProxyHandler (/proxy-ws) <==> 内部主信道 (/client-ws)
+# 关键保障:
+#   - 消息保序队列 ProxyMessageQueue 统一转发与广播；
+#   - _maintain_connection 定时发送 heartbeat 并在断线时自动指数退避重连。
+# =============================================================================
 class ProxyHandler:
     """
     A proxy handler that allows multiple clients to connect through a single WebSocket connection to the server.

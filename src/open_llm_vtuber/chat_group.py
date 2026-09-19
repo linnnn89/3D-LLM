@@ -12,6 +12,19 @@ class Group:
     members: Set[str]  # Set of client_uids
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 多角色群聊与客户端组网状态机 (ChatGroupManager)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   管理多个 WebSocket 客户端（或多个虚拟角色模型）之间的房间关系、发言权限与群发广播。
+# 核心状态:
+#   - client_group_map: client_uid -> group_id 双向索引
+#   - groups: group_id -> Group(owner_uid, members)
+# 协同机制:
+#   - 动态成组: 邀请加入 add_client_to_group（自动建群，自动转移房主所有权）;
+#   - 断线级联: 成员断开时自动从群剔除，房主断开则顺位继承或销毁空群 (remove_client)；
+#   - 广播通道: broadcast_to_group 过滤发送者自身或全量广播。
+# =============================================================================
 class ChatGroupManager:
     def __init__(self):
         self.client_group_map: Dict[str, str] = {}  # client_uid -> group_id

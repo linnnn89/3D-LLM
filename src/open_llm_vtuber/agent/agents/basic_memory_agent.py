@@ -30,6 +30,17 @@ from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 基础对话记忆与智能体交互循环 (BasicMemoryAgent)
+# -----------------------------------------------------------------------------
+# 角色职责:
+#   负责对话历史状态维系（短期滑动窗口）、大模型交互协议封装、流式生成管道装配，
+#   以及 MCP 外部工具调用的多轮多步循环交互 (Tool Interaction Loop)。
+# 状态与边界:
+#   - _memory: 内存短程记忆滑动窗口 (仅保留最近 max_history_messages 条，防止超长上下文耗尽 Token)；
+#   - chat: 通过 _chat_function_factory 被装饰器链包裹的流式生成入口；
+#   - Tool Loop: 支持 Claude / OpenAI 原生函数调用，以及 Prompt 提示词兜底模式。
+# =============================================================================
 class BasicMemoryAgent(AgentInterface):
     """Agent with basic chat memory and tool calling support."""
 
@@ -303,6 +314,17 @@ class BasicMemoryAgent(AgentInterface):
 
         return messages
 
+    # =========================================================================
+    # [架构节点 / 核心回路] Claude MCP 工具调用闭环 (Tool Interaction Loop)
+    # -------------------------------------------------------------------------
+    # 闭环机制:
+    #   1. 向大模型发起带有 tools 定义的流式请求；
+    #   2. 产出的 text_delta 实时 yield 给下游渲染显示；
+    #   3. 侦测到 tool_use_complete 时，收集工具调用 ID 与参数；
+    #   4. 调用 _tool_executor.execute_tools 执行外部 MCP 工具；
+    #   5. 工具执行结果包装为 tool_result 角色消息追加到 messages 列表；
+    #   6. 重新进入 while True 循环将结果交回大模型继续思考，直至无新工具调用。
+    # =========================================================================
     async def _claude_tool_interaction_loop(
         self,
         initial_messages: List[Dict[str, Any]],
@@ -594,6 +616,17 @@ class BasicMemoryAgent(AgentInterface):
                     self._add_message(current_turn_text, "assistant")
                 return
 
+    # =========================================================================
+    # [架构装配节点] 对话流水线组装工厂 (_chat_function_factory)
+    # -------------------------------------------------------------------------
+    # 核心职责:
+    #   将底层的 chat_with_memory 依次通过 4 层装饰器进行打包：
+    #   chat_with_memory (产生流式文本或工具事件字典)
+    #     -> @sentence_divider (分句并维持 Tag 状态)
+    #     -> @actions_extractor (提取情绪关键词转换为 Live2D Actions)
+    #     -> @display_processor (清洗情绪标签生成 DisplayText)
+    #     -> @tts_filter (过滤语音禁读字符生成最终 SentenceOutput)
+    # =========================================================================
     def _chat_function_factory(
         self,
     ) -> Callable[[BatchInput], AsyncIterator[Union[SentenceOutput, Dict[str, Any]]]]:

@@ -16,6 +16,23 @@ from .types import GroupConversationState
 from prompts import prompt_loader
 
 
+# =============================================================================
+# [架构导航 / 核心节点] 对话主线分流与任务派发中心 (Conversation Handler)
+# -----------------------------------------------------------------------------
+# 角色职责: 解析触发指令来源，将任务分流至单人流水线或群组协同流水线，并托管打断控制。
+# 触发分支:
+#   - ai-speak-signal: AI主动破冰/自言自语（加载主动提示词，跳过历史与长记忆落盘）
+#   - text-input: 文本直接输入
+#   - mic-audio-end: 从 received_data_buffers 提取累积 PCM 音频，并在提取后立即清空缓冲区
+# 关键分流路由:
+#   - 群聊模式 (group.members > 1):
+#       启动 process_group_conversation 协程，task_key = group_id
+#   - 单人模式 (默认):
+#       启动 process_single_conversation 协程，task_key = client_uid
+# 高危并发控制:
+#   - 将启动的 Task 登记至 current_conversation_tasks[task_key]，保证后续被打断时可精准取消；
+#   - 麦克风音频提取与缓冲区置空必须原子进行，防止上一轮语音污染下一轮识别。
+# =============================================================================
 async def handle_conversation_trigger(
     msg_type: str,
     data: dict,
@@ -65,6 +82,7 @@ async def handle_conversation_trigger(
     elif msg_type == "text-input":
         user_input = data.get("text", "")
     else:  # mic-audio-end
+        # [高危数据交接] 消费当前累积的音频流并立即重置缓冲区，防止脏数据滞留
         user_input = received_data_buffers[client_uid]
         received_data_buffers[client_uid] = np.array([])
 
@@ -73,7 +91,7 @@ async def handle_conversation_trigger(
 
     group = chat_group_manager.get_client_group(client_uid)
     if group and len(group.members) > 1:
-        # Use group_id as task key for group conversations
+        # [路由跳转: 群聊流水线]
         task_key = group.group_id
         if (
             task_key not in current_conversation_tasks
@@ -95,7 +113,7 @@ async def handle_conversation_trigger(
                 )
             )
     else:
-        # Use client_uid as task key for individual conversations
+        # [路由跳转: 单人流水线]
         current_conversation_tasks[client_uid] = asyncio.create_task(
             process_single_conversation(
                 context=context,
@@ -109,6 +127,14 @@ async def handle_conversation_trigger(
         )
 
 
+# =============================================================================
+# [架构节点 / 单人打断] 单人对话截断处理
+# -----------------------------------------------------------------------------
+# 关键联动:
+#   1. task.cancel(): 立即取消 process_single_conversation 协程；
+#   2. agent_engine.handle_interrupt: 截断 LLM / Agent 内部生成与记忆上下文；
+#   3. store_message: 保存已被用户听到的已播放部分响应，并记录 "[Interrupted by user]"。
+# =============================================================================
 async def handle_individual_interrupt(
     client_uid: str,
     current_conversation_tasks: Dict[str, Optional[asyncio.Task]],

@@ -1,138 +1,71 @@
 import * as THREE from 'three';
+import { BasePmxMotionSystem } from './base_motion.js';
+import {
+  CantarellaMotionSystem,
+  applyCantarellaNaturalPose,
+  ensureCantarellaMotionClips,
+  CANTARELLA_EXPRESSION_PROFILES
+} from '../pmx-models/坎特蕾拉/motion/cantarella_motion.js';
+import {
+  KurumiMotionSystem,
+  applyKurumiNaturalPose,
+  ensureKurumiMotionClips,
+  KURUMI_EXPRESSION_PROFILES
+} from '../pmx-models/时崎狂三/motion/kurumi_motion.js';
+import {
+  TohruMotionSystem,
+  applyTohruNaturalPose,
+  ensureTohruMotionClips,
+  TOHRU_EXPRESSION_PROFILES
+} from '../pmx-models/托尔/motion/tohru_motion.js';
 
 /**
  * =========================================================================
  * Open-LLM-VTuber: PMX & Blend Dedicated Motion System
- * 目录: D:\\CODEX PROJECT\\Open-LLM-VTuber\\pmx_motion\\index.js
+ * 路径: D:\CODEX PROJECT\Open-LLM-VTuber\pmx_motion\index.js
  * 
- * 本模块与 VRM 动作系统完全物理隔离，专为 Blender / PMX 角色打造：
- * 1. 骨骼语义映射 (PMX / MMD / Biped / 3dsMax 兼容)
- * 2. 沉肩垂手自然站姿 (彻底消除 A-Pose 僵硬耸肩与张开)
- * 3. 固化至 mmd.animationPose (杜绝每帧渲染被底层还原回 A-Pose)
- * 4. 专属待机循环 (3.6s 呼吸起伏 + 双臂微晃) 与完整动作设计集
+ * 本模块为专为 Blender / PMX 角色打造的动作与姿态驱动核心，严格对齐日本标准 MMD 规范：
+ * 1. 骨骼寻址命名：100% 遵循日本标准 MMD 汉字命名（全ての親、センター、上半身、頭、腕、ひじ、手首等）。
+ * 2. 休止站姿规范：以标准 A-Pose 为基准进行人体工学下垂沉肩微调，并固化至 mmd.animationPose。
+ * 3. 动力学驱动规范：身体重心起伏、跳跃一律作用于 センター 骨骼位移，绝不污染舞台定位骨。
+ * 4. 旋转附与保护：彻底移除陈旧的侵入式前臂捩骨覆盖逻辑，保护标准 MMD 捩骨系统的纯净性。
  * =========================================================================
  */
 
+/**
+ * 标准日本 MMD 骨骼语义映射表
+ * 仅保留纯正 MMD 规范命名，废弃陈旧的 3ds Max / Biped 兼容别名。
+ */
 export const PMX_BONE_MAPPING = {
-  'head': ['頭', '头', 'Head', 'Bip001 Head', 'head'],
-  'neck': ['首', 'Neck', 'Bip001 Neck', 'neck'],
-  'chest': ['上半身2', '上半身', 'Chest', 'Bip001 Spine1', 'chest'],
-  'spine': ['上半身', 'Spine', 'Bip001 Spine', 'spine'],
-  'hips': ['センター', '下半身', 'Hips', 'Center', 'Bip001 Pelvis', 'Bip001'],
-  'leftShoulder': ['左肩', 'LeftShoulder', 'Bip001 L Clavicle', 'shoulderP_L', 'leftShoulder'],
-  'rightShoulder': ['右肩', 'RightShoulder', 'Bip001 R Clavicle', 'shoulderP_R', 'rightShoulder'],
-  'leftUpperArm': ['左腕', 'LeftUpperArm', 'Bip001 L UpperArm', 'BN_Sleeve_L'],
-  'rightUpperArm': ['右腕', 'RightUpperArm', 'Bip001 R UpperArm', 'BN_Sleeve_R'],
-  'leftLowerArm': ['左ひじ', '左前腕', 'LeftLowerArm', 'Bip001 L Forearm'],
-  'rightLowerArm': ['右ひじ', '右前腕', 'RightLowerArm', 'Bip001 R Forearm'],
-  'leftHand': ['左手首', '左手', 'LeftHand', 'Bip001 L Hand'],
-  'rightHand': ['右手首', '右手', 'RightHand', 'Bip001 R Hand']
+  'head': ['頭'],
+  'neck': ['首'],
+  'chest': ['上半身2', '上半身'],
+  'spine': ['上半身'],
+  'hips': ['センター', 'グルーブ', '下半身'],
+  'leftShoulder': ['左肩'],
+  'rightShoulder': ['右肩'],
+  'leftUpperArm': ['左腕'],
+  'rightUpperArm': ['右腕'],
+  'leftLowerArm': ['左ひじ'],
+  'rightLowerArm': ['右ひじ'],
+  'leftHand': ['左手首'],
+  'rightHand': ['右手首'],
+  'rightThumb': ['右親指１', '右親指０'],
+  'rightMiddle': ['右中指１'],
+  'leftThumb': ['左親指１', '左親指０'],
+  'leftMiddle': ['左中指１']
 };
 
 /**
- * 施加 Blender / PMX 角色的自然垂手站姿 (Natural Rest Pose)
- * 基于 MMD 动捕与解剖学微调数据：
+ * 施加 Blender / PMX 角色的标准自然垂手站姿 (Natural Rest Pose)
+ * 基于标准 MMD A-Pose (大臂约 40°~45°) 进行解剖学少女立姿微调：
  * - 沉肩：Z 轴微倾 ±0.05 rad，消除斜方肌耸肩紧张感；
- * - 垂臂：从 45° A-Pose 沿 Z 轴进一步下压 0.50~0.55 rad (约 30°~32°)，达到 75°~80° 自然立姿；
- * - 前倾防穿模：X 轴轻微前倾 0.12 rad，给大袖口和裙撑留出安全距离；
- * - 肘部与手腕微屈：呈现柔和放松的少女休止体态。
+ * - 垂臂：从 45° A-Pose 沿 Z 轴进一步下压 0.52 rad (约 30°)，达到 75°~80° 端庄自然立姿；
+ * - 前倾防穿模：X 轴轻微前倾 0.12 rad，给大袖口与裙撑预留物理距离；
+ * - 肘部与手腕微屈：手肘微屈内敛 (0.20 rad)，指尖顺势微收偏向内侧。
  */
-/**
- * 修复 PMX / Blender 导出模型常见的面部脱臼异常 (Skinning Detachment Fix)
- * 根因排查：
- * 在 Blender / MMD 导出为 PMX 时，许多模型的面部/五官网格（如狂三的材质.002与材质.003）
- * 顶点的骨骼蒙皮权重被错误赋予了根骨骼 (Tokisaki_Skill01_Skip_Finish / Bone 0) 而非头部骨骼 (Head)。
- * 这导致一旦角色头颈旋转，身体与头发转动，但整张脸被死死锚定在世界原点，造成恐怖的面部撕裂分离。
- * 本函数在加载时毫秒级扫描并纠正该蒙皮索引，将面部顶点重新绑定回头部骨骼。
- */
-export function repairPmxSkinning(adapter) {
-  if (!adapter) return;
-  const mesh = adapter.getRootNode() || adapter.mesh;
-  if (!mesh || !mesh.skeleton || !mesh.geometry) return;
-
-  const bones = mesh.skeleton.bones;
-  const geom = mesh.geometry;
-  if (!geom.attributes || !geom.attributes.skinIndex || !geom.attributes.skinWeight) return;
-
-  const head = adapter.resolveBone('head');
-  if (!head) return;
-  const headIdx = bones.indexOf(head);
-  if (headIdx < 0) return;
-
-  const skinIndices = geom.attributes.skinIndex;
-  const skinWeights = geom.attributes.skinWeight;
-  const indexAttr = geom.index;
-  const groups = geom.groups || [];
-
-  let fixedCount = 0;
-
-  // 根骨骼集合 (索引 0 或者是没有父级的根节点)
-  const isRootBoneIdx = (idx) => {
-    if (idx === 0) return true;
-    const b = bones[idx];
-    return b && (!b.parent || b.name.toLowerCase().includes('root') || b.name.toLowerCase().includes('finish'));
-  };
-
-  // 1. 扫描带有面部表情 MorphTarget (形态键) 的顶点
-  const morphPositions = geom.morphAttributes?.position || [];
-  const faceVertexIndices = new Set();
-  for (const attr of morphPositions) {
-    for (let i = 0; i < attr.count; i++) {
-      if (Math.abs(attr.getX(i)) > 0.0001 || Math.abs(attr.getY(i)) > 0.0001 || Math.abs(attr.getZ(i)) > 0.0001) {
-        faceVertexIndices.add(i);
-      }
-    }
-  }
-
-  for (const vIdx of faceVertexIndices) {
-    for (let j = 0; j < 4; j++) {
-      const bIdx = skinIndices.getComponent(vIdx, j);
-      const w = skinWeights.getComponent(vIdx, j);
-      if (w > 0.01 && isRootBoneIdx(bIdx)) {
-        skinIndices.setComponent(vIdx, j, headIdx);
-        fixedCount++;
-      }
-    }
-  }
-
-  // 2. 扫描材质分组：如果某个材质分组超 70% 顶点绑在根骨骼上，且属于头部零件
-  for (const g of groups) {
-    let rootBoundCount = 0;
-    const count = g.count;
-    for (let i = 0; i < count; i++) {
-      const vIdx = indexAttr ? indexAttr.getX(g.start + i) : (g.start + i);
-      for (let j = 0; j < 4; j++) {
-        const bIdx = skinIndices.getComponent(vIdx, j);
-        const w = skinWeights.getComponent(vIdx, j);
-        if (w > 0.05 && isRootBoneIdx(bIdx)) {
-          rootBoundCount++;
-          break;
-        }
-      }
-    }
-    if (count > 0 && (rootBoundCount / count) > 0.7 && count < 30000) {
-      for (let i = 0; i < count; i++) {
-        const vIdx = indexAttr ? indexAttr.getX(g.start + i) : (g.start + i);
-        for (let j = 0; j < 4; j++) {
-          const bIdx = skinIndices.getComponent(vIdx, j);
-          if (isRootBoneIdx(bIdx)) {
-            skinIndices.setComponent(vIdx, j, headIdx);
-            fixedCount++;
-          }
-        }
-      }
-    }
-  }
-
-  if (fixedCount > 0) {
-    skinIndices.needsUpdate = true;
-    console.log(`[PmxSkinning] 🔧 成功自动纠正 [${adapter.characterName || 'PMX'}] 的面部骨骼绑定异常 (共重定向 ${fixedCount} 处顶点权重至头部骨骼)`);
-  }
-}
-
 export function applyNaturalPose(adapter) {
   if (!adapter) return;
-  repairPmxSkinning(adapter);
 
   const lShoulder = adapter.resolveBone('leftShoulder');
   const rShoulder = adapter.resolveBone('rightShoulder');
@@ -147,28 +80,22 @@ export function applyNaturalPose(adapter) {
   if (lShoulder) lShoulder.rotation.set(0.0, 0.0, -0.05);
   if (rShoulder) rShoulder.rotation.set(0.0, 0.0, 0.05);
 
-  // 2. 上臂自然下垂 (根据模型服饰微调，防穿模)
-  const charId = (adapter.characterId || '').toLowerCase();
-  const name = (adapter.characterName || '').toLowerCase();
-  const isTohru = charId === 'zh_tohru_01' || name.includes('托尔') || name.includes('トール') || name.includes('tohru');
-  const isKurumi = charId === 'zh_tokisaki_kurumi_01' || name.includes('狂三') || name.includes('kurumi');
-
-  // 托尔有较大蓬蓬袖与宽裙摆，取 0.50 rad；狂三为哥特灵装，取 0.55 rad
-  const armAngleZ = isTohru ? 0.50 : (isKurumi ? 0.55 : 0.54);
-  const armAngleX = 0.12;
+  // 2. 上臂标准下垂微倾 (A-Pose 基础上自然下垂 0.50 rad，微前倾 -0.06 rad 防向后反撇)
+  const armAngleZ = 0.50;
+  const armAngleX = -0.06;
 
   if (lArm) lArm.rotation.set(armAngleX, 0.05, -armAngleZ);
   if (rArm) rArm.rotation.set(armAngleX, -0.05, armAngleZ);
 
-  // 3. 肘部自然微屈内敛 (少女休止体态，告别僵硬直立悬挂)
-  if (lElbow) lElbow.rotation.set(0.20, 0.12, -0.22);
-  if (rElbow) rElbow.rotation.set(0.20, -0.12, 0.22);
+  // 3. 肘部自然向前微屈内敛 (X 为 -0.16 rad 向前自然微屈，彻底告别反向向后折)
+  if (lElbow) lElbow.rotation.set(-0.16, 0.08, -0.18);
+  if (rElbow) rElbow.rotation.set(-0.16, -0.08, 0.18);
 
-  // 4. 手腕顺势微敛放松，指尖自然指向地面偏内侧
-  if (lHand) lHand.rotation.set(0.08, 0.0, -0.10);
-  if (rHand) rHand.rotation.set(0.08, 0.0, 0.10);
+  // 4. 手腕顺势微敛放松，指尖自然指向身前偏内侧地面
+  if (lHand) lHand.rotation.set(-0.05, 0.0, -0.08);
+  if (rHand) rHand.rotation.set(-0.05, 0.0, 0.08);
 
-  // 刷新变换并同步到四元数
+  // 刷新局部变换矩阵并更新世界矩阵
   for (const b of [lShoulder, rShoulder, lArm, rArm, lElbow, rElbow, lHand, rHand]) {
     if (b) b.updateMatrix();
   }
@@ -176,7 +103,7 @@ export function applyNaturalPose(adapter) {
   const rootMesh = adapter.getRootNode() || adapter.mesh;
   if (rootMesh) rootMesh.updateMatrixWorld(true);
 
-  // 关键固化：同步更新 mmd.animationPose，防止 @moeru/three-mmd 每帧 beforeUpdate 还原回 A-Pose
+  // 关键固化：同步更新 mmd.animationPose，防止 @moeru/three-mmd 运行时在每帧更新前还原回 A-Pose
   if (adapter.mmd && rootMesh && rootMesh.skeleton && rootMesh.skeleton.bones) {
     adapter.mmd.animationPose = rootMesh.skeleton.bones.map((bone) => ({
       position: bone.position.clone(),
@@ -186,7 +113,69 @@ export function applyNaturalPose(adapter) {
 }
 
 /**
- * 为 PMX / Blend 角色生成全套专属程序化动作片段 (Clips)
+ * 角色自身基准坐标计算：
+ * 右 = 右肩−左肩，上 = +Y，前 = 上×右（正对观众视野）。
+ * 自适应不同模型朝向与骨骼差异。
+ */
+export function characterBasis(adapter) {
+  const left = adapter.resolveBone('leftUpperArm');
+  const right = adapter.resolveBone('rightUpperArm');
+  if (!left || !right) return null;
+  const rootMesh = adapter.getRootNode() || adapter.mesh;
+  if (rootMesh) rootMesh.updateMatrixWorld(true);
+  const rightAxis = new THREE.Vector3()
+    .subVectors(right.getWorldPosition(new THREE.Vector3()), left.getWorldPosition(new THREE.Vector3()))
+    .normalize();
+  const upAxis = new THREE.Vector3(0, 1, 0);
+  return {
+    right: rightAxis,
+    up: upAxis,
+    forward: new THREE.Vector3().crossVectors(upAxis, rightAxis).normalize()
+  };
+}
+
+export function basisToWorld(basis, a, b, c) {
+  return new THREE.Vector3()
+    .addScaledVector(basis.right, a)
+    .addScaledVector(basis.up, b)
+    .addScaledVector(basis.forward, c)
+    .normalize();
+}
+
+/**
+ * 反解「让 node 指向 targetWorldDir」所需的局部旋转增量。
+ * 计算公式：Δ = parentWorld⁻¹ · worldDelta · parentWorld
+ * 使得世界增量恒为 worldDelta，无论骨骼的局部坐标系如何定义，都能精确指向 targetWorldDir。
+ */
+export function solveBoneAim(node, child, targetWorldDir) {
+  const parentWorld = node.parent ? node.parent.getWorldQuaternion(new THREE.Quaternion()) : new THREE.Quaternion();
+  const currentDir = new THREE.Vector3()
+    .subVectors(child.getWorldPosition(new THREE.Vector3()), node.getWorldPosition(new THREE.Vector3()))
+    .normalize();
+  const worldDelta = new THREE.Quaternion().setFromUnitVectors(
+    currentDir,
+    targetWorldDir.clone().normalize()
+  );
+  return parentWorld.clone().invert().multiply(worldDelta).multiply(parentWorld);
+}
+
+/**
+ * 掌心法线计算：cross(拇指方向, 手指方向)
+ */
+export function palmNormal(adapter, side = 'right') {
+  const hand = adapter.resolveBone(`${side}Hand`);
+  const thumb = adapter.resolveBone(`${side}Thumb`);
+  const finger = adapter.resolveBone(`${side}Middle`);
+  if (!hand || !thumb || !finger) return null;
+  const origin = hand.getWorldPosition(new THREE.Vector3());
+  const thumbDir = thumb.getWorldPosition(new THREE.Vector3()).sub(origin).normalize();
+  const fingerDir = finger.getWorldPosition(new THREE.Vector3()).sub(origin).normalize();
+  return new THREE.Vector3().crossVectors(thumbDir, fingerDir).normalize();
+}
+
+/**
+ * 为 PMX / Blend 角色生成全套专属标准程序化动作片段 (Clips)
+ * 全部动作均基于标准 MMD 骨骼（頭, 上半身, センター, 腕, ひじ, 手首）精确驱动。
  */
 export function ensureProceduralPmxMotionClips(adapter, targetClipsMap = {}) {
   if (!adapter) return targetClipsMap;
@@ -232,41 +221,153 @@ export function ensureProceduralPmxMotionClips(adapter, targetClipsMap = {}) {
     return clip;
   };
 
-  // 1. wave_hand & greeting (轻柔招手问候, 2.7s)
-  if (rArm && rElbow && rHand) {
-    const tracks = [];
-    const tArm = makeQuatTrack(rArm, [0.0, 0.4, 2.3, 2.7], [
-      [0, 0, 0], [0.35, -0.20, 0.95], [0.35, -0.20, 0.95], [0, 0, 0]
-    ]);
-    if (tArm) tracks.push(tArm);
-
-    const tElbow = makeQuatTrack(rElbow, [0.0, 0.4, 2.3, 2.7], [
-      [0, 0, 0], [0.55, -0.30, 0.65], [0.55, -0.30, 0.65], [0, 0, 0]
-    ]);
-    if (tElbow) tracks.push(tElbow);
-
-    const tHand = makeQuatTrack(rHand, [0.0, 0.4, 0.7, 1.0, 1.3, 1.6, 1.9, 2.3, 2.7], [
-      [0, 0, 0],
-      [0.05, -0.25, 0.20],
-      [0.05, 0.25, -0.15],
-      [0.05, -0.25, 0.20],
-      [0.05, 0.25, -0.15],
-      [0.05, -0.25, 0.20],
-      [0.05, 0.25, -0.15],
-      [0.05, 0, 0],
-      [0, 0, 0]
-    ]);
-    if (tHand) tracks.push(tHand);
-
-    if (head) {
-      const tHead = makeQuatTrack(head, [0.0, 0.45, 2.3, 2.7], [
-        [0, 0, 0], [-0.04, -0.10, 0.08], [-0.04, -0.10, 0.08], [0, 0, 0]
-      ]);
-      if (tHead) tracks.push(tHead);
+  const quatTrack = (bone, restQuat, times, quats) => {
+    if (!bone) return null;
+    const values = [];
+    for (const q of quats) {
+      values.push(...q.clone().multiply(restQuat).toArray());
     }
+    return new THREE.QuaternionKeyframeTrack(`${bone.name}.quaternion`, times, values);
+  };
 
-    const waveClip = registerClip('wave_hand', 2.7, tracks);
-    targetClipsMap['greeting'] = waveClip;
+  // 1. wave_hand (轻柔招手问候, 2.7s - 基于解剖学目标世界指向反解，掌心正对观众，肘部纯屈伸)
+  if (rArm && rElbow && rHand) {
+    const basis = characterBasis(adapter);
+    const rootMesh = adapter.getRootNode() || adapter.mesh;
+    if (basis && rootMesh) {
+      const UPPER_TARGET = basisToWorld(basis, 0.76, -0.48, 0.44); // 肘尖朝下偏后，在躯干前侧
+      const FORE_TARGET = basisToWorld(basis, -0.22, 0.96, -0.13); // 手举至脸颊耳畔侧前方
+      const SWING_DEG = 16;
+      const VIEWER_DIR = new THREE.Vector3(0, 0, 1);
+      const IDENTITY_QUAT = new THREE.Quaternion();
+
+      const qUpRest = rArm.quaternion.clone();
+      const qLowRest = rElbow.quaternion.clone();
+      const qHandRest = rHand.quaternion.clone();
+
+      // ① 上臂反解指向 UPPER_TARGET
+      const dUp = solveBoneAim(rArm, rElbow, UPPER_TARGET);
+      rArm.quaternion.copy(qUpRest).premultiply(dUp);
+      rootMesh.updateMatrixWorld(true);
+
+      // ② 前臂反解挥摆
+      const foreDelta = (swingDeg) => {
+        rElbow.quaternion.copy(qLowRest);
+        rootMesh.updateMatrixWorld(true);
+        const target = FORE_TARGET.clone().applyQuaternion(
+          new THREE.Quaternion().setFromAxisAngle(basis.forward, THREE.MathUtils.degToRad(swingDeg))
+        );
+        return solveBoneAim(rElbow, rHand, target);
+      };
+
+      const dSwingIn = foreDelta(-SWING_DEG);
+      const dSwingMid = foreDelta(0);
+      const dSwingOut = foreDelta(SWING_DEG);
+
+      // ③ 手腕反解掌心对人
+      rElbow.quaternion.copy(qLowRest).premultiply(dSwingMid);
+      rootMesh.updateMatrixWorld(true);
+
+      const palm = palmNormal(adapter, 'right');
+      const handParentWorld = rHand.parent ? rHand.parent.getWorldQuaternion(new THREE.Quaternion()) : null;
+      const dHand = (palm && handParentWorld)
+        ? handParentWorld
+            .clone()
+            .invert()
+            .multiply(new THREE.Quaternion().setFromUnitVectors(palm, VIEWER_DIR))
+            .multiply(handParentWorld)
+        : IDENTITY_QUAT;
+
+      // ④ 复位骨骼回休止姿态，避免污染后续计算
+      rArm.quaternion.copy(qUpRest);
+      rElbow.quaternion.copy(qLowRest);
+      rHand.quaternion.copy(qHandRest);
+      rootMesh.updateMatrixWorld(true);
+
+      const tracks = [
+        // 抬臂 -> 保持 -> 落回
+        quatTrack(rArm, qUpRest, [0.0, 0.35, 2.45, 2.7], [
+          IDENTITY_QUAT, dUp, dUp, IDENTITY_QUAT
+        ]),
+        // 前臂挥摆 3 次
+        quatTrack(
+          rElbow,
+          qLowRest,
+          [0.0, 0.35, 0.65, 0.95, 1.25, 1.55, 1.85, 2.15, 2.45, 2.7],
+          [
+            IDENTITY_QUAT, dSwingMid, dSwingOut, dSwingIn, dSwingOut,
+            dSwingIn, dSwingOut, dSwingIn, dSwingMid, IDENTITY_QUAT
+          ]
+        ),
+        // 手腕掌心对人
+        quatTrack(rHand, qHandRest, [0.0, 0.35, 2.45, 2.7], [
+          IDENTITY_QUAT, dHand, dHand, IDENTITY_QUAT
+        ])
+      ];
+
+      // 头部迎视微笑
+      if (head) {
+        const tHead = makeQuatTrack(head, [0.0, 0.45, 2.45, 2.7], [
+          [0, 0, 0], [0.02, -0.12, 0.07], [0.02, -0.12, 0.07], [0, 0, 0]
+        ]);
+        if (tHead) tracks.push(tHead);
+      }
+
+      registerClip('wave_hand', 2.7, tracks);
+
+      // 1b. pmx_greeting (MMD风 全身礼貌致意打招呼, 3.2s)
+      // 右手胸前自然挥动 + 掌心朝向观众 + 屈膝重心下沉(hips -> センター) + 躯干微躬(chest) + 眼神迎视
+      const greetingTracks = [
+        quatTrack(rArm, qUpRest, [0.0, 0.45, 2.75, 3.2], [
+          IDENTITY_QUAT, dUp, dUp, IDENTITY_QUAT
+        ]),
+        quatTrack(
+          rElbow,
+          qLowRest,
+          [0.0, 0.45, 0.85, 1.25, 1.65, 2.05, 2.45, 2.75, 3.2],
+          [
+            IDENTITY_QUAT, dSwingMid, dSwingOut, dSwingIn, dSwingOut,
+            dSwingIn, dSwingOut, dSwingMid, IDENTITY_QUAT
+          ]
+        ),
+        quatTrack(rHand, qHandRest, [0.0, 0.45, 2.75, 3.2], [
+          IDENTITY_QUAT, dHand, dHand, IDENTITY_QUAT
+        ])
+      ];
+
+      // 重心下沉与屈膝：严格作用于 センター 骨骼位移
+      if (hips) {
+        const tHips = makePosTrack(hips, [0.0, 0.5, 1.4, 2.4, 3.2], [
+          [0, 0, 0],
+          [0, -0.12, 0.03],
+          [0, -0.12, 0.03],
+          [0, -0.04, 0.01],
+          [0, 0, 0]
+        ]);
+        if (tHips) greetingTracks.push(tHips);
+      }
+
+      if (chest) {
+        const tChest = makeQuatTrack(chest, [0.0, 0.5, 1.5, 2.5, 3.2], [
+          [0, 0, 0], [0.06, 0, 0], [0.06, 0, 0], [0.02, 0, 0], [0, 0, 0]
+        ]);
+        if (tChest) greetingTracks.push(tChest);
+      }
+
+      if (head) {
+        const tHead = makeQuatTrack(head, [0.0, 0.4, 1.0, 2.0, 2.7, 3.2], [
+          [0, 0, 0],
+          [0.08, 0, 0],
+          [-0.04, -0.08, 0.04],
+          [-0.04, -0.08, 0.04],
+          [0.02, 0, 0],
+          [0, 0, 0]
+        ]);
+        if (tHead) greetingTracks.push(tHead);
+      }
+
+      registerClip('pmx_greeting', 3.2, greetingTracks);
+    }
   }
 
   // 2. gentle_nod (温柔点头, 1.7s)
@@ -301,7 +402,7 @@ export function ensureProceduralPmxMotionClips(adapter, targetClipsMap = {}) {
     registerClip('shake_head', 1.65, tracks);
   }
 
-  // 4. cheerful_bounce (雀跃跳跃, 1.5s)
+  // 4. cheerful_bounce (雀跃跳跃, 1.5s - 作用于 センター 骨骼垂直位移)
   {
     const tracks = [];
     if (hips) {
@@ -329,7 +430,7 @@ export function ensureProceduralPmxMotionClips(adapter, targetClipsMap = {}) {
     registerClip('cheerful_bounce', 1.5, tracks);
   }
 
-  // 5. surprise_jump (受惊后缩, 1.4s)
+  // 5. surprise_jump (受惊后缩, 1.4s - 作用于 センター 骨骼 Y/Z 轴位移)
   {
     const tracks = [];
     if (hips) {
@@ -415,129 +516,63 @@ export function ensureProceduralPmxMotionClips(adapter, targetClipsMap = {}) {
 }
 
 /**
- * 独立的 Blend / PMX 动作管理器类 (BlendMotionSystem)
+ * =========================================================================
+ * 角色人设表情管理配方系统 (Character Persona Expression Profiles)
+ * 为特定二次元角色（如托尔）量身定制复合形态键组合与动作联动表情
+ * =========================================================================
  */
-export class BlendMotionSystem {
+
+
+export const DEFAULT_EXPRESSION_PROFILES = {
+  emotions: {
+    'happy': { '笑い': 0.85, '口角上げ': 0.80 },
+    'angry': { '怒り': 0.85, '口角下げ': 0.60 },
+    'sad': { '困る': 0.85, '口角下げ': 0.70 },
+    'relaxed': { '口角上げ': 0.70, 'ウィンク': 0.60 },
+    'surprised': { 'びっくり': 0.85, 'あ': 0.60, '困る': 0.50 },
+    'neutral': {}
+  },
+  actionExpressions: {
+    'wave_hand': { '笑い': 0.60, '口角上げ': 0.70 },
+    'pmx_greeting': { '口角上げ': 0.80, '笑い': 0.40 },
+    'cheerful_bounce': { '笑い': 0.90, '口角上げ': 0.80 },
+    'pout_turn': { '怒り': 0.50, '口角下げ': 0.70 },
+    'shy_tilt': { '笑い': 0.50, '口角上げ': 0.60 },
+    'surprise_jump': { 'びっくり': 0.80, 'あ': 0.60 },
+    'gentle_nod': { '口角上げ': 0.60 },
+    'shake_head': { '困る': 0.40 }
+  }
+};
+
+export function getCharacterExpressionProfile(adapter) {
+  if (!adapter) return DEFAULT_EXPRESSION_PROFILES;
+  const name = (adapter.characterName || '').toLowerCase();
+  const id = (adapter.characterId || '').toLowerCase();
+  const url = (adapter.url || '').toLowerCase();
+  if (id.includes('tohru') || name.includes('托尔') || name.includes('トール') || url.includes('tohru')) {
+    return TOHRU_EXPRESSION_PROFILES;
+  }
+  return DEFAULT_EXPRESSION_PROFILES;
+}
+
+/**
+ * 独立的 Blend / PMX 动作与表情协同管理器类 (BlendMotionSystem)
+ * 继承自全局 BasePmxMotionSystem，全局动作切换自动触发原点复位守卫与生命周期管控
+ */
+export class BlendMotionSystem extends BasePmxMotionSystem {
   constructor(adapter) {
-    this.adapter = adapter;
-    this.mesh = adapter.getRootNode() || adapter.mesh;
-    this.mixer = null;
-    this.activeMotionClips = {};
-    this.currentIdleAction = null;
-    this.currentMotionAction = null;
-    this.currentMotionFinishedHandler = null;
+    super(adapter, {
+      profile: getCharacterExpressionProfile(adapter),
+      ensureClipsFn: ensureProceduralPmxMotionClips,
+      applyPoseFn: applyNaturalPose
+    });
   }
 
-  init() {
-    applyNaturalPose(this.adapter);
-    this.setupMixer();
-  }
-
-  setupMixer() {
-    if (this.mixer) {
-      this.mixer.stopAllAction();
+  resolveMotionAlias(motionName) {
+    if (!this.activeMotionClips[motionName] && motionName === 'greeting' && this.activeMotionClips['pmx_greeting']) {
+      return 'pmx_greeting';
     }
-    this.mixer = new THREE.AnimationMixer(this.mesh);
-    this.adapter.mixer = this.mixer;
-    window.currentAnimationMixer = this.mixer;
-
-    this.activeMotionClips = {};
-    ensureProceduralPmxMotionClips(this.adapter, this.activeMotionClips);
-    this.adapter.activeMotionClips = this.activeMotionClips;
-    if (window.activeMotionClips) {
-      Object.assign(window.activeMotionClips, this.activeMotionClips);
-    }
-
-    this.playIdleMotion();
-  }
-
-  playIdleMotion() {
-    if (!this.mixer) return;
-    const clip = this.activeMotionClips['idle'];
-    if (!clip) return;
-
-    if (this.currentIdleAction) {
-      this.currentIdleAction.stop();
-    }
-    this.currentIdleAction = this.mixer.clipAction(clip);
-    this.currentIdleAction.setLoop(THREE.LoopRepeat);
-    this.currentIdleAction.setEffectiveWeight(1.0);
-    this.currentIdleAction.fadeIn(0.4).play();
-  }
-
-  playMotion(motionName) {
-    if (!this.mixer) return false;
-    const clip = this.activeMotionClips[motionName];
-    if (!clip) {
-      console.debug(`[BlendMotion] 动作 ${motionName} 未找到对应动画片段`);
-      return false;
-    }
-
-    console.log(`[BlendMotion] ▶ 播放 Blend 肢体动作: ${motionName}`);
-
-    if (this.currentMotionAction) {
-      if (this.currentMotionFinishedHandler) {
-        this.mixer.removeEventListener('finished', this.currentMotionFinishedHandler);
-        this.currentMotionFinishedHandler = null;
-      }
-      this.currentMotionAction.stop();
-      this.currentMotionAction = null;
-    }
-
-    const action = this.mixer.clipAction(clip);
-    action.stop();
-    action.reset();
-    action.setLoop(THREE.LoopOnce, 1);
-    action.clampWhenFinished = true;
-    action.setEffectiveWeight(1.0);
-
-    if (this.currentIdleAction) {
-      action.crossFadeFrom(this.currentIdleAction, 0.25, false);
-    } else {
-      action.fadeIn(0.25);
-    }
-
-    action.play();
-    this.currentMotionAction = action;
-
-    const onFinished = (e) => {
-      if (e.action !== action) return;
-      this.mixer.removeEventListener('finished', onFinished);
-      if (this.currentMotionFinishedHandler === onFinished) this.currentMotionFinishedHandler = null;
-      if (this.currentMotionAction !== action) return;
-      this.currentMotionAction = null;
-      action.fadeOut(0.35);
-      if (this.currentIdleAction) {
-        this.currentIdleAction.reset().setEffectiveWeight(1.0).fadeIn(0.35).play();
-      }
-    };
-    this.currentMotionFinishedHandler = onFinished;
-    this.mixer.addEventListener('finished', onFinished);
-    return true;
-  }
-
-  update(delta, elapsedTime) {
-    if (this.adapter && this.adapter.mmd) {
-      if (this.mixer) {
-        this.adapter.mmd.updateWithMixer(delta, this.mixer);
-      } else {
-        this.adapter.mmd.update(delta);
-      }
-    }
-  }
-
-  destroy() {
-    if (this.mixer) {
-      this.mixer.stopAllAction();
-      if (this.currentMotionFinishedHandler) {
-        this.mixer.removeEventListener('finished', this.currentMotionFinishedHandler);
-        this.currentMotionFinishedHandler = null;
-      }
-      this.mixer = null;
-    }
-    this.activeMotionClips = {};
-    this.currentIdleAction = null;
-    this.currentMotionAction = null;
+    return motionName;
   }
 }
 
@@ -551,6 +586,53 @@ class MotionRouter {
     this.currentModelType = null;
   }
 
+  isCantarellaPmx(adapter) {
+    if (!adapter) return false;
+    const url = (adapter.url || '').toLowerCase();
+    const type = (adapter.type || '').toLowerCase();
+    const charId = (adapter.characterId || '').toLowerCase();
+    const name = (adapter.characterName || '').toLowerCase();
+
+    // 必须为 PMX/PMD 模型，绝不抢占 VRM 版坎特蕾拉
+    const isPmx = type === 'pmx' || url.endsWith('.pmx') || url.endsWith('.pmd') || charId === 'zh_cantarella_pmx_01';
+    if (!isPmx) return false;
+
+    return charId === 'zh_cantarella_pmx_01' ||
+           url.includes('坎特蕾拉') || url.includes('cantarella') ||
+           name.includes('坎特蕾拉') || name.includes('cantarella') || name.includes('カンタレラ');
+  }
+
+  isKurumiPmx(adapter) {
+    if (!adapter) return false;
+    const url = (adapter.url || '').toLowerCase();
+    const type = (adapter.type || '').toLowerCase();
+    const charId = (adapter.characterId || '').toLowerCase();
+    const name = (adapter.characterName || '').toLowerCase();
+
+    const isPmx = type === 'pmx' || url.endsWith('.pmx') || url.endsWith('.pmd') || charId === 'zh_tokisaki_kurumi_01';
+    if (!isPmx) return false;
+
+    return charId === 'zh_tokisaki_kurumi_01' ||
+           url.includes('时崎狂三') || url.includes('kurumi') ||
+           name.includes('时崎狂三') || name.includes('狂三') || name.includes('kurumi');
+  }
+
+  isTohruPmx(adapter) {
+    if (!adapter) return false;
+    const url = (adapter.url || '').toLowerCase();
+    const type = (adapter.type || '').toLowerCase();
+    const charId = (adapter.characterId || '').toLowerCase();
+    const name = (adapter.characterName || '').toLowerCase();
+
+    // 必须为 PMX/PMD 模型，精准识别托尔 (Tohru)
+    const isPmx = type === 'pmx' || url.endsWith('.pmx') || url.endsWith('.pmd') || charId === 'zh_tohru_01';
+    if (!isPmx) return false;
+
+    return charId === 'zh_tohru_01' ||
+           url.includes('托尔') || url.includes('tohru') ||
+           name.includes('托尔') || name.includes('トール') || name.includes('tohru');
+  }
+
   isBlendModel(adapter) {
     if (!adapter) return false;
     const url = (adapter.url || '').toLowerCase();
@@ -558,33 +640,74 @@ class MotionRouter {
     const charId = (adapter.characterId || '').toLowerCase();
     const name = (adapter.characterName || '').toLowerCase();
 
-    return type === 'pmx' || type === 'blend' ||
-           url.endsWith('.pmx') || url.endsWith('.pmd') || url.endsWith('.blend') ||
-           charId === 'zh_tohru_01' || charId === 'zh_tokisaki_kurumi_01' ||
+    // 仅匹配 PMX/PMD/Blend，非 VRM 模型
+    const isNonVrm = type === 'pmx' || type === 'blend' ||
+                     url.endsWith('.pmx') || url.endsWith('.pmd') || url.endsWith('.blend') ||
+                     charId === 'zh_tohru_01';
+    if (!isNonVrm) return false;
+
+    return charId === 'zh_tohru_01' ||
            name.includes('托尔') || name.includes('トール') || name.includes('tohru') ||
-           name.includes('狂三') || name.includes('kurumi');
+           type === 'pmx' || type === 'blend';
   }
 
   route(adapter) {
     if (!adapter) return;
 
+    // 1. 优先匹配：坎特蕾拉专属 PMX 动作系统 (CantarellaMotionSystem)
+    if (this.isCantarellaPmx(adapter)) {
+      this.currentModelType = 'cantarella';
+      console.log(`[MotionRouter] 🍷 路由 -> 坎特蕾拉专属 PMX 动作系统 (CantarellaMotionSystem, 角色: ${adapter.characterName || 'Cantarella'})`);
+      this.activeSystem = new CantarellaMotionSystem(adapter);
+      adapter.cantarellaMotionSystem = this.activeSystem;
+      adapter.blendMotionSystem = this.activeSystem;
+      this.activeSystem.init();
+      return;
+    }
+
+    // 2. 优先匹配：时崎狂三专属 PMX 动作与魅惑表情系统 (KurumiMotionSystem)
+    if (this.isKurumiPmx(adapter)) {
+      this.currentModelType = 'kurumi';
+      console.log(`[MotionRouter] ⏳ 路由 -> 时崎狂三专属 PMX 动作系统 (KurumiMotionSystem, 角色: ${adapter.characterName || 'Kurumi'})`);
+      this.activeSystem = new KurumiMotionSystem(adapter);
+      adapter.kurumiMotionSystem = this.activeSystem;
+      adapter.blendMotionSystem = this.activeSystem;
+      this.activeSystem.init();
+      return;
+    }
+
+    // 3. 优先匹配：托尔专属 PMX 动作与龙女仆表情系统 (TohruMotionSystem)
+    if (this.isTohruPmx(adapter)) {
+      this.currentModelType = 'tohru';
+      console.log(`[MotionRouter] 🐉 路由 -> 托尔专属 PMX 动作系统 (TohruMotionSystem, 角色: ${adapter.characterName || 'Tohru'})`);
+      this.activeSystem = new TohruMotionSystem(adapter);
+      adapter.tohruMotionSystem = this.activeSystem;
+      adapter.blendMotionSystem = this.activeSystem;
+      this.activeSystem.init();
+      return;
+    }
+
+    // 4. 匹配：通用 Blend / PMX 动作系统 (BlendMotionSystem)
     if (this.isBlendModel(adapter)) {
       this.currentModelType = 'blend';
       console.log(`[MotionRouter] 🔄 路由 -> Blend / PMX 独立动作系统 (角色: ${adapter.characterName || 'Unknown'})`);
       this.activeSystem = new BlendMotionSystem(adapter);
+      adapter.blendMotionSystem = this.activeSystem;
       this.activeSystem.init();
-    } else {
-      this.currentModelType = 'vrm';
-      console.log(`[MotionRouter] 🔄 路由 -> VRM 原生动作系统 (角色: ${adapter.characterName || 'Unknown'})`);
-      this.activeSystem = null; // 由原有 VRM 脚本自行调度
-      if (typeof adapter.setupMotionMixer === 'function') {
-        adapter.setupMotionMixer();
-      }
+      return;
+    }
+
+    // 4. 回退：VRM 原生动作系统 (喜多郁代 / 由比滨结衣 / 雷电将军 / 弗洛洛 / 坎特蕾拉VRM)
+    this.currentModelType = 'vrm';
+    console.log(`[MotionRouter] 🔄 路由 -> VRM 原生动作系统 (角色: ${adapter.characterName || 'Unknown'})`);
+    this.activeSystem = null;
+    if (typeof adapter.setupMotionMixer === 'function') {
+      adapter.setupMotionMixer();
     }
   }
 
   playMotion(name) {
-    if (this.currentModelType === 'blend' && this.activeSystem) {
+    if (this.activeSystem && typeof this.activeSystem.playMotion === 'function') {
       return this.activeSystem.playMotion(name);
     }
     // VRM 回退至全局原有 playMotion
@@ -595,18 +718,54 @@ class MotionRouter {
     return false;
   }
 
+  playIdleMotion() {
+    if (this.activeSystem && typeof this.activeSystem.playIdleMotion === 'function') {
+      return this.activeSystem.playIdleMotion();
+    }
+    return false;
+  }
+
+  setEmotion(preset, weight) {
+    if (this.activeSystem && typeof this.activeSystem.setEmotion === 'function') {
+      this.activeSystem.setEmotion(preset, weight);
+      return true;
+    }
+    return false;
+  }
+
   update(delta, elapsedTime) {
-    if (this.currentModelType === 'blend' && this.activeSystem) {
+    if (this.activeSystem && typeof this.activeSystem.update === 'function') {
       this.activeSystem.update(delta, elapsedTime);
     }
   }
 
   destroy() {
     if (this.activeSystem) {
-      this.activeSystem.destroy();
+      try {
+        this.activeSystem.destroy();
+      } catch (e) {
+        console.warn('[MotionRouter] 销毁 activeSystem 异常:', e);
+      }
       this.activeSystem = null;
     }
+    this.currentModelType = null;
   }
 }
 
 export const motionRouter = new MotionRouter();
+
+export {
+  BasePmxMotionSystem,
+  CantarellaMotionSystem,
+  applyCantarellaNaturalPose,
+  ensureCantarellaMotionClips,
+  CANTARELLA_EXPRESSION_PROFILES,
+  KurumiMotionSystem,
+  applyKurumiNaturalPose,
+  ensureKurumiMotionClips,
+  KURUMI_EXPRESSION_PROFILES,
+  TohruMotionSystem,
+  applyTohruNaturalPose,
+  ensureTohruMotionClips,
+  TOHRU_EXPRESSION_PROFILES
+};

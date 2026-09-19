@@ -58,6 +58,19 @@ class WSMessage(TypedDict, total=False):
     display_text: Optional[dict]
 
 
+# =============================================================================
+# [架构导航 / 核心节点] WebSocket 协议调度中枢 (WebSocketHandler)
+# -----------------------------------------------------------------------------
+# 角色职责: 全系统客户端通信的总调度中枢，管理多连接、会话状态映射、消息协议路由与任务打断。
+# 维护的核心状态映射:
+#   - client_connections: client_uid -> WebSocket 实时连接对象
+#   - client_contexts: client_uid -> session 专有 ServiceContext
+#   - chat_group_manager: 客户端群聊/多角色映射状态机
+#   - current_conversation_tasks: client_uid/group_id -> 当前正在执行的 asyncio.Task (用于精确打断取消)
+#   - received_data_buffers: client_uid -> np.ndarray (麦克风音频流拼接缓冲区)
+# 核心通信回路:
+#   客户端 -> routes.py -> websocket_handler.py -> 协议分发字典 _message_handlers -> conversations
+# =============================================================================
 class WebSocketHandler:
     """Handles WebSocket connections and message routing"""
 
@@ -73,6 +86,17 @@ class WebSocketHandler:
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
 
+    # =========================================================================
+    # [路由分发表] WebSocket 协议消息动作映射表
+    # -------------------------------------------------------------------------
+    # 协议指令分类:
+    #   - 音频数据: mic-audio-data (拼接缓冲), raw-audio-data (VAD分段)
+    #   - 对话触发: mic-audio-end, text-input, ai-speak-signal -> _handle_conversation_trigger
+    #   - 打断控制: interrupt-signal -> _handle_interrupt
+    #   - 历史记录: fetch-history-list, fetch-and-set-history, create-new-history, delete-history
+    #   - 配置热切: fetch-configs, switch-config
+    #   - 群聊协作: add-client-to-group, remove-client-from-group, request-group-info
+    # =========================================================================
     def _init_message_handlers(self) -> Dict[str, Callable]:
         """Initialize message type to handler mapping"""
         return {
@@ -277,6 +301,16 @@ class WebSocketHandler:
             send_group_update=self.send_group_update,
         )
 
+    # =========================================================================
+    # [生命周期与高危收尾] 客户端连接断开级联清理
+    # -------------------------------------------------------------------------
+    # 步骤解析:
+    #   1. 若在群组中，广播群组打断 handle_group_interrupt；
+    #   2. 处理群组成员退出 handle_client_disconnect；
+    #   3. 释放网络连接映射 client_connections 与音频接收缓冲区 received_data_buffers；
+    #   4. 强制取消正在执行的对话异步任务 task.cancel()，避免后台虚假执行与孤儿协程；
+    #   5. 调用 context.close() 销毁专属 MCP 进程与 Agent 资源。
+    # =========================================================================
     async def handle_disconnect(self, client_uid: str) -> None:
         """Handle client disconnection"""
         group = self.chat_group_manager.get_client_group(client_uid)
@@ -366,6 +400,14 @@ class WebSocketHandler:
                 )
             )
 
+    # =========================================================================
+    # [架构节点 / 打断控制] 用户说话打断或前端中止信号处理
+    # -------------------------------------------------------------------------
+    # 上游触发: 收到 "interrupt-signal" 或 VAD 探测到用户插话
+    # 下游流向:
+    #   - 多人模式: handle_group_interrupt (向全组广播截断通知并移除发言队列)
+    #   - 单人模式: handle_individual_interrupt (取消协程 + Agent截断 + 存盘)
+    # =========================================================================
     async def _handle_interrupt(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
@@ -510,6 +552,15 @@ class WebSocketHandler:
                         json.dumps({"type": "control", "text": "mic-audio-end"})
                     )
 
+    # =========================================================================
+    # [架构跳转 / 对话总触发] 用户输入/语音结束/主动说话触发点
+    # -------------------------------------------------------------------------
+    # 上游触发: mic-audio-end (麦克风结束), text-input (文本输入), ai-speak-signal (主动发言)
+    # 下游流向: conversations/conversation_handler.py -> handle_conversation_trigger
+    # 传递关键状态:
+    #   - received_data_buffers: 提供累积的音频流 float32 数组供 ASR 识别
+    #   - current_conversation_tasks: 将新启动的对话任务协程挂入管理表以便打断
+    # =========================================================================
     async def _handle_conversation_trigger(
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
