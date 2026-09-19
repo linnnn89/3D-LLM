@@ -617,15 +617,6 @@ export function ensureCantarellaMotionClips(adapter, targetClipsMap = {}) {
     registerClip('shake_head', 1.8, tracksShake);
   }
 
-  // 映射别名确保各处调用无缝兼容
-  if (targetClipsMap['cantarella_graceful_greeting']) {
-    targetClipsMap['pmx_greeting'] = targetClipsMap['cantarella_graceful_greeting'];
-    targetClipsMap['greeting'] = targetClipsMap['cantarella_graceful_greeting'];
-  }
-  if (targetClipsMap['cantarella_alluring_whisper']) {
-    targetClipsMap['wave_hand'] = targetClipsMap['cantarella_alluring_whisper'];
-  }
-
   return targetClipsMap;
 }
 

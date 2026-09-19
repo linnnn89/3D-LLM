@@ -6,6 +6,7 @@ import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-v
 import { MMDLoader } from '@moeru/three-mmd';
 import {
   PMX_BONE_MAPPING,
+  PMX_MORPH_CANDIDATES,
   applyNaturalPose as applyPmxNaturalPose,
   ensureProceduralPmxMotionClips,
   applyCantarellaNaturalPose,
@@ -14,7 +15,14 @@ import {
   ensureKurumiMotionClips,
   applyTohruNaturalPose,
   ensureTohruMotionClips,
-  motionRouter
+  motionRouter,
+  clampFrameDelta,
+  findCharacterDescriptor,
+  CharacterAdapter,
+  VrmCharacterAdapter,
+  PmxCharacterAdapter,
+  normalizeChip,
+  DEFAULT_MOTION_LABELS
 } from '/pmx_motion/index.js';
 
 window.THREE = THREE;
@@ -80,16 +88,16 @@ const CHARACTER_META = {
     name: 'トール',
     short: '竜',
     pmx: '/pmx-models/托尔/Tohru_v1.0.pmx',
-    greeting: '小林さーん！お帰りなさいませ！今日も世界で一番愛してますよっ！',
-    chips: ['小林さんについて教えて！', '特製尻尾肉はいかがですか？', 'ドラゴンの世界のお话', '今日の家事は何にする？']
+    greeting: '小林さーん！お帰りなさいませ！今日も世界で一番愛してますよっ！'
+    // chips 由 PMX_CHARACTER_REGISTRY 集中维护
   },
   'zh_tokisaki_kurumi_01': {
     id: 'zh_tokisaki_kurumi_01',
     name: '時崎狂三',
     short: '狂',
     pmx: '/pmx-models/时崎狂三/时崎狂三.pmx',
-    greeting: 'うふふ……ごきげんよう、可愛いお方。そんなに熱い目で見つめて……わたくしに何を求めていらっしゃいますの？',
-    chips: ['👗 优雅提裙行礼', '💋 掩唇低语 (うふふ…)', '🎯 招牌指枪 (Bang~)', '🖤 撩发回眸']
+    greeting: 'うふふ……ごきげんよう、可愛いお方。そんなに熱い目で見つめて……わたくしに何を求めていらっしゃいますの？'
+    // chips 由 PMX_CHARACTER_REGISTRY 集中维护
   },
   'zh_cantarella_01': {
     id: 'zh_cantarella_01',
@@ -104,8 +112,8 @@ const CHARACTER_META = {
     name: 'カンタレラ (PMX)',
     short: '蕾',
     pmx: '/pmx-models/坎特蕾拉/坎特蕾拉.pmx',
-    greeting: 'ごきげんよう、私の可愛い漂泊者。貴方が来てくれるのを待っていましたわ。',
-    chips: ['💜 魅惑吐舌 (声痕显现)', '🍷 优雅致意', '🥀 毒药的滋味', '💋 亲密邀约']
+    greeting: 'ごきげんよう、私の可愛い漂泊者。貴方が来てくれるのを待っていましたわ。'
+    // chips 由 PMX_CHARACTER_REGISTRY 集中维护
   },
   'zh_phrolova_01': {
     id: 'zh_phrolova_01',
@@ -160,7 +168,6 @@ const activeMotionClips = {};   // 绑定到当前角色骨骼上的 THREE.Anima
 const MOTION_URLS = {
   'idle': './motions/idle_loop.vrma',           // Pixiv/ChatVRM 官方待机循环
   'greeting': './motions/greeting.vrma',        // Pixiv VRoid Project 官方动捕 (BOOTH 免费包)
-  'VRMA_01': './motions/VRMA_01.vrma',          // 官方包原始文件 (与 greeting 同源)
   'wave_hand': './motions/wave_hand.vrma',      // 缺省时走程序化
   'shake_head': './motions/shake_head.vrma',
   'gentle_nod': './motions/gentle_nod.vrma',
@@ -411,541 +418,45 @@ function dropDisabledNormalMaps(vrm) {
 const REFERENCE_HEAD_HEIGHT = 1.4111;
 
 // --- 3. Dual-Format Character Adapter Architecture (VRM & PMX) ---
+// 适配器逻辑已统一收敛至 /pmx_motion/adapters.js (支持无 DOM 纯类测试与解耦 DI 注入)
+window.CharacterAdapter = CharacterAdapter;
+window.VrmCharacterAdapter = VrmCharacterAdapter;
+window.PmxCharacterAdapter = PmxCharacterAdapter;
 
 /**
- * 角色适配器抽象基类 (CharacterAdapter)
- * 统一 VRM 与 PMX (MMD) 底层实例，向外暴露一致的生命周期、表情、骨骼反解与视口接口。
+ * 为 VRM 角色构建 AnimationMixer 并挂载 Clips (契约解耦：让 adapters.js 免受 @pixiv/three-vrm-animation 依赖捆绑)
  */
-class CharacterAdapter {
-  constructor(url, characterName = '') {
-    this.url = url;
-    this.characterName = characterName;
-    this.type = 'base';
-    this.restPoseType = 'tpose'; // 'tpose' (VRM) | 'astance' (PMX)
-    this.model = null;
-    this.mixer = null;
-    this.activeMotionClips = {};
-    this.currentIdleAction = null;
-    this.currentMotionAction = null;
-    this.currentMotionFinishedHandler = null;
-    this.scaleFactor = 1.0;
+function setupVrmMotionMixer(adapter) {
+  if (!adapter || !adapter.vrm) return;
+  if (currentAnimationMixer) {
+    currentAnimationMixer.stopAllAction();
   }
+  const mixer = new THREE.AnimationMixer(adapter.vrm.scene);
+  currentAnimationMixer = mixer;
+  currentIdleAction = null;
+  currentMotionAction = null;
+  autoGreetingDone = false;
 
-  getRootNode() { return null; }
-  getHitMesh() { return this.getRootNode(); }
-  resolveBone(semanticName) { return null; }
-  setLipSync(vaa, voh) {}
-  setBlink(weight) {}
-  setEmotion(preset, weight) {}
-  setHeadPitch(rad) {}
-  update(delta, elapsedTime) {}
+  const clips = {};
+  for (const k in activeMotionClips) delete activeMotionClips[k];
 
-  destroy() {
-    if (this.mixer) {
-      this.mixer.stopAllAction();
-      if (this.currentMotionFinishedHandler) {
-        this.mixer.removeEventListener('finished', this.currentMotionFinishedHandler);
-        this.currentMotionFinishedHandler = null;
-      }
-      this.mixer = null;
-    }
-    const root = this.getRootNode();
-    if (root && scene) {
-      scene.remove(root);
-    }
-    this.activeMotionClips = {};
-    this.currentIdleAction = null;
-    this.currentMotionAction = null;
-  }
-}
-
-/**
- * VRM 角色适配器 (VrmCharacterAdapter)
- * 封装 three-vrm 的 Humanoid、ExpressionManager、LookAt 与 SpringBone
- */
-class VrmCharacterAdapter extends CharacterAdapter {
-  constructor(vrm, url, characterName = '', characterId = '') {
-    super(url, characterName);
-    this.characterId = characterId;
-    this.type = 'vrm';
-    this.restPoseType = 'tpose';
-    this.vrm = vrm;
-    this.model = vrm;
-    currentVrm = vrm; // 保持向后兼容
-
-    this.initModel();
-  }
-
-  getRootNode() {
-    return this.vrm ? this.vrm.scene : null;
-  }
-
-  getHitMesh() {
-    return this.vrm ? this.vrm.scene : null;
-  }
-
-  resolveBone(semanticName) {
-    if (!this.vrm || !this.vrm.humanoid) return null;
-    return this.vrm.humanoid.getNormalizedBoneNode(semanticName) ||
-           this.vrm.humanoid.getRawBoneNode(semanticName);
-  }
-
-  initModel() {
-    const vrm = this.vrm;
-    scene.add(vrm.scene);
-
-    // Rotate model if VRM 0.x
-    VRMUtils.rotateVRM0(vrm);
-
-    // 尺寸归一化到统一头骨高度
-    this.normalizeScale(REFERENCE_HEAD_HEIGHT);
-
-    // 修正禁用贴图导致的面部过曝
-    dropDisabledNormalMaps(vrm);
-
-    // 自然休止站姿
-    applyNaturalPose(vrm);
-
-    // 视线追踪目标
-    if (vrm.lookAt) {
-      vrm.lookAt.target = camera;
-    }
-
-    // 初始化 Mixer 与动作
-    this.setupMotionMixer();
-  }
-
-  normalizeScale(referenceHeadHeight) {
-    const headNode = this.vrm.humanoid?.getRawBoneNode('head');
-    if (!headNode) {
-      console.warn('[VRM] 没有 head 骨，跳过尺寸归一化');
-      return;
-    }
-    this.vrm.scene.updateMatrixWorld(true);
-    const headY = headNode.getWorldPosition(new THREE.Vector3()).y;
-    if (!Number.isFinite(headY) || headY <= 0.01) {
-      console.warn(`[VRM] head 骨高度异常 (${headY})，跳过尺寸归一化`);
-      return;
-    }
-    const scale = referenceHeadHeight / headY;
-    this.scaleFactor = scale;
-    this.vrm.scene.scale.multiplyScalar(scale);
-    this.vrm.scene.updateMatrixWorld(true);
-    console.log(`[VRM] 尺寸归一化：head 骨 ${headY.toFixed(4)} → ×${scale.toFixed(4)}（目标 ${referenceHeadHeight}）`);
-  }
-
-  setupMotionMixer() {
-    if (currentAnimationMixer) {
-      currentAnimationMixer.stopAllAction();
-    }
-    this.mixer = new THREE.AnimationMixer(this.vrm.scene);
-    currentAnimationMixer = this.mixer;
-    currentIdleAction = null;
-    currentMotionAction = null;
-    autoGreetingDone = false;
-
-    for (const k in activeMotionClips) delete activeMotionClips[k];
-
-    for (const [name, vrmAnim] of Object.entries(loadedVrmAnimations)) {
-      try {
-        const clip = createVRMAnimationClip(vrmAnim, this.vrm);
-        activeMotionClips[name] = clip;
-        this.activeMotionClips[name] = clip;
-      } catch (e) {
-        console.warn(`[Motion] 为新角色生成动作 clip 失败 (${name}):`, e);
-      }
-    }
-
-    ensureProceduralMotionClips(this.vrm);
-    Object.assign(this.activeMotionClips, activeMotionClips);
-
-    playIdleMotion();
-    maybeAutoGreeting();
-  }
-
-  setLipSync(vaa, voh) {
-    if (!this.vrm || !this.vrm.expressionManager) return;
-    this.vrm.expressionManager.setValue('aa', vaa);
-    this.vrm.expressionManager.setValue('oh', voh);
-  }
-
-  setBlink(weight) {
-    if (!this.vrm || !this.vrm.expressionManager) return;
-    this.vrm.expressionManager.setValue('blink', weight);
-  }
-
-  setEmotion(preset, weight) {
-    if (!this.vrm || !this.vrm.expressionManager) return;
-    ['happy', 'sad', 'angry', 'surprised', 'relaxed'].forEach((name) => {
-      this.vrm.expressionManager.setValue(name, 0);
-    });
-    if (preset && preset !== 'neutral') {
-      this.vrm.expressionManager.setValue(preset, weight);
+  for (const [name, vrmAnim] of Object.entries(loadedVrmAnimations)) {
+    try {
+      const clip = createVRMAnimationClip(vrmAnim, adapter.vrm);
+      activeMotionClips[name] = clip;
+      clips[name] = clip;
+    } catch (e) {
+      console.warn(`[Motion] 为新角色生成动作 clip 失败 (${name}):`, e);
     }
   }
 
-  setHeadPitch(rad) {
-    const head = this.resolveBone('head');
-    if (head) {
-      head.rotation.x = rad;
-    }
-  }
+  ensureProceduralMotionClips(adapter.vrm);
+  Object.assign(clips, activeMotionClips);
 
-  update(delta, elapsedTime) {
-    if (this.vrm) {
-      this.vrm.update(delta);
-    }
-  }
+  adapter.attachMixer(mixer, clips);
 
-  destroy() {
-    super.destroy();
-    if (this.vrm) {
-      VRMUtils.deepDispose(this.vrm.scene);
-      this.vrm = null;
-      currentVrm = null;
-    }
-  }
-}
-
-/**
- * PMX 角色适配器 (PmxCharacterAdapter)
- * 采用社区成熟的高性能运行时 @moeru/three-mmd
- */
-const PMX_MORPH_CANDIDATES = {
-  'aa': ['あ', 'a', 'A', '口_あ', 'Mouth_ah', 'mouth_ah'],
-  'oh': ['お', 'o', 'O', '口_お', 'Mouth_oh', 'mouth_oh'],
-  'blink': ['まばたき', '眨眼', 'blink', 'Reye_close', 'Leye_close'],
-  'blinkRight': ['ウィンク右', '眨眼右', 'Reye_close', 'Reye_close_smile'],
-  'blinkLeft': ['ウィンク', '眨眼左', 'Leye_close', 'Leye_close_smile'],
-  'happy': ['笑い', 'にっこり', '笑顔', 'happy', 'Mouth_smile', 'mouth_smile'],
-  'sad': ['困る', '悲しい', '下がり眉', 'sad', 'Eye_sorrow', 'eye_sorrow', 'Eyebrow_SP04'],
-  'angry': ['怒り', 'つり眉', 'angry', 'Eye_angry', 'Mouth_angry', 'Eyebrow_SP06'],
-  'surprised': ['びっくり', '驚き', 'surprised', 'Eyebrow_SP05', 'Mouth_SP04'],
-  'relaxed': ['Mouth_smile', 'smile', 'Reye_close_smile', 'Mouth_SP03']
-};
-
-
-class PmxCharacterAdapter extends CharacterAdapter {
-  constructor(mmd, url, characterName = '', characterId = '') {
-    super(url, characterName);
-    this.characterId = characterId;
-    this.type = 'pmx';
-    this.restPoseType = 'astance';
-    this.mmd = mmd;
-    this.mesh = mmd.mesh;
-    this.model = mmd;
-    this.morphIndices = {};
-    this.boneCache = {};
-    this.activeMotionClips = {};
-
-    this.initModel();
-  }
-
-  getRootNode() {
-    return this.mesh;
-  }
-
-  getHitMesh() {
-    return this.mesh;
-  }
-
-  resolveBone(semanticName) {
-    if (this.boneCache[semanticName] !== undefined) {
-      return this.boneCache[semanticName];
-    }
-    const candidates = PMX_BONE_MAPPING[semanticName] || [semanticName];
-    let found = null;
-    if (this.mesh && this.mesh.skeleton && this.mesh.skeleton.bones) {
-      for (const name of candidates) {
-        found = this.mesh.skeleton.bones.find((b) => b.name === name);
-        if (found) break;
-      }
-    }
-    this.boneCache[semanticName] = found;
-    return found;
-  }
-
-  isCantarella() {
-    const url = (this.url || '').toLowerCase();
-    const type = (this.type || '').toLowerCase();
-    const charId = (this.characterId || '').toLowerCase();
-    const name = (this.characterName || '').toLowerCase();
-
-    const isPmx = type === 'pmx' || url.endsWith('.pmx') || url.endsWith('.pmd') || charId === 'zh_cantarella_pmx_01';
-    if (!isPmx) return false;
-
-    return charId === 'zh_cantarella_pmx_01' ||
-           url.includes('坎特蕾拉') || url.includes('cantarella') ||
-           name.includes('坎特蕾拉') || name.includes('cantarella') || name.includes('カンタレラ');
-  }
-
-  isKurumi() {
-    const url = (this.url || '').toLowerCase();
-    const type = (this.type || '').toLowerCase();
-    const charId = (this.characterId || '').toLowerCase();
-    const name = (this.characterName || '').toLowerCase();
-
-    const isPmx = type === 'pmx' || url.endsWith('.pmx') || url.endsWith('.pmd') || charId === 'zh_tokisaki_kurumi_01';
-    if (!isPmx) return false;
-
-    return charId === 'zh_tokisaki_kurumi_01' ||
-           url.includes('时崎狂三') || url.includes('kurumi') ||
-           name.includes('时崎狂三') || name.includes('狂三') || name.includes('kurumi');
-  }
-
-  isTohru() {
-    const url = (this.url || '').toLowerCase();
-    const type = (this.type || '').toLowerCase();
-    const charId = (this.characterId || '').toLowerCase();
-    const name = (this.characterName || '').toLowerCase();
-
-    const isPmx = type === 'pmx' || url.endsWith('.pmx') || url.endsWith('.pmd') || charId === 'zh_tohru_01';
-    if (!isPmx) return false;
-
-    return charId === 'zh_tohru_01' ||
-           url.includes('托尔') || url.includes('tohru') ||
-           name.includes('托尔') || name.includes('トール') || name.includes('tohru');
-  }
-
-  applyNaturalPose() {
-    if (this.isCantarella()) {
-      applyCantarellaNaturalPose(this);
-    } else if (this.isKurumi()) {
-      applyKurumiNaturalPose(this);
-    } else if (this.isTohru()) {
-      applyTohruNaturalPose(this);
-    } else {
-      applyPmxNaturalPose(this);
-    }
-  }
-
-  initModel() {
-    scene.add(this.mesh);
-
-    // 缓存 Morph 字典映射
-    this.buildMorphCache();
-
-    // 材质去油去反光：二次元模型 specular 归零，消除金属高光白斑
-    this.mesh.traverse((obj) => {
-      if (!obj.isMesh || !obj.material) return;
-      const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
-      for (const mat of materials) {
-        if (mat.specular && typeof mat.specular.setRGB === 'function') {
-          mat.specular.setRGB(0, 0, 0);
-        }
-        if (mat.shininess !== undefined) {
-          mat.shininess = 0;
-        }
-        mat.needsUpdate = true;
-      }
-    });
-
-    // 尺寸归一化
-    this.normalizeScale(REFERENCE_HEAD_HEIGHT);
-
-    // 施加自然女仆站姿 (Natural Rest Pose) 并固化到 MMD animationPose 基底
-    this.applyNaturalPose();
-    if (this.mmd) {
-      const bones = this.mesh.skeleton.bones;
-      this.mmd.animationPose = bones.map((bone) => ({
-        position: bone.position.clone(),
-        rotation: bone.quaternion.clone()
-      }));
-    }
-
-    // 初始化动画 Mixer 与动作 clips
-    this.setupMixer();
-  }
-
-  buildMorphCache() {
-    const dict = this.mesh.morphTargetDictionary || {};
-    for (const [semantic, candidates] of Object.entries(PMX_MORPH_CANDIDATES)) {
-      this.morphIndices[semantic] = [];
-      for (const cand of candidates) {
-        if (dict[cand] !== undefined) {
-          this.morphIndices[semantic].push(dict[cand]);
-        }
-      }
-    }
-  }
-
-  normalizeScale(referenceHeadHeight) {
-    this.mesh.updateMatrixWorld(true);
-    const headNode = this.resolveBone('head');
-    let headY = 20.0; // MMD 常见默认标高估算
-    if (headNode) {
-      headY = headNode.getWorldPosition(new THREE.Vector3()).y;
-    }
-    if (!Number.isFinite(headY) || headY <= 0.01) {
-      console.warn(`[PMX] head 骨高度异常 (${headY})，采用默认缩放系数 0.07`);
-      headY = 20.0;
-    }
-    const scale = referenceHeadHeight / headY;
-    this.scaleFactor = scale;
-    if (this.mmd && typeof this.mmd.setScalar === 'function') {
-      this.mmd.setScalar(scale);
-    } else {
-      this.mesh.scale.multiplyScalar(scale);
-    }
-    this.mesh.updateMatrixWorld(true);
-    console.log(`[PMX] 尺寸归一化：head 骨 ${headY.toFixed(4)} → ×${scale.toFixed(4)}（目标 ${referenceHeadHeight}）`);
-  }
-
-  setupMixer() {
-    if (currentAnimationMixer) {
-      currentAnimationMixer.stopAllAction();
-    }
-    this.mixer = new THREE.AnimationMixer(this.mesh);
-    currentAnimationMixer = this.mixer;
-    currentIdleAction = null;
-    currentMotionAction = null;
-    autoGreetingDone = false;
-
-    // 清空全局动作 clips 映射，以本角色为准
-    for (const k in activeMotionClips) delete activeMotionClips[k];
-
-    // 生成并注入 PMX 专用动作 Clips 集（优先坎特蕾拉/狂三专属动作套件）
-    if (this.isCantarella()) {
-      ensureCantarellaMotionClips(this, activeMotionClips);
-    } else if (this.isKurumi()) {
-      ensureKurumiMotionClips(this, activeMotionClips);
-    } else {
-      ensureProceduralPmxMotionClips(this, activeMotionClips);
-    }
-    this.activeMotionClips = {};
-    Object.assign(this.activeMotionClips, activeMotionClips);
-
-    playIdleMotion();
-    maybeAutoGreeting();
-  }
-
-  setLipSync(vaa, voh) {
-    if (this.kurumiMotionSystem && typeof this.kurumiMotionSystem.setLipSync === 'function') {
-      this.kurumiMotionSystem.setLipSync(vaa, voh);
-    }
-    if (!this.mesh || !this.mesh.morphTargetInfluences) return;
-    const aaIndices = this.morphIndices['aa'] || [];
-    const ohIndices = this.morphIndices['oh'] || [];
-    for (const idx of aaIndices) this.mesh.morphTargetInfluences[idx] = vaa;
-    for (const idx of ohIndices) this.mesh.morphTargetInfluences[idx] = voh;
-  }
-
-  setBlink(weight) {
-    if (this.kurumiMotionSystem && typeof this.kurumiMotionSystem.setBlink === 'function') {
-      this.kurumiMotionSystem.setBlink(weight);
-    }
-    if (!this.mesh || !this.mesh.morphTargetInfluences) return;
-    const blinkIndices = this.morphIndices['blink'] || [];
-    for (const idx of blinkIndices) {
-      this.mesh.morphTargetInfluences[idx] = weight;
-    }
-  }
-
-  setEmotion(preset, weight = 0.85) {
-    if (this.kurumiMotionSystem && typeof this.kurumiMotionSystem.setEmotion === 'function') {
-      this.kurumiMotionSystem.setEmotion(preset, weight);
-      return;
-    }
-    if (this.blendMotionSystem && typeof this.blendMotionSystem.setEmotion === 'function') {
-      this.blendMotionSystem.setEmotion(preset, weight);
-      return;
-    }
-    if (!this.mesh || !this.mesh.morphTargetInfluences) return;
-    // 情绪先互斥清零
-    for (const key of ['happy', 'sad', 'angry', 'surprised', 'relaxed']) {
-      const list = this.morphIndices[key] || [];
-      for (const idx of list) {
-        this.mesh.morphTargetInfluences[idx] = 0;
-      }
-    }
-    if (preset && preset !== 'neutral') {
-      const list = this.morphIndices[preset] || [];
-      for (const idx of list) {
-        this.mesh.morphTargetInfluences[idx] = weight;
-      }
-    }
-  }
-
-  setHeadPitch(rad) {
-    const head = this.resolveBone('head');
-    if (head) {
-      head.rotation.x = rad;
-    }
-  }
-
-  update(delta, elapsedTime) {
-    if (motionRouter && motionRouter.activeSystem && motionRouter.activeSystem.adapter === this) {
-      motionRouter.update(delta, elapsedTime);
-      return;
-    }
-    if (this.blendMotionSystem) {
-      this.blendMotionSystem.update(delta, elapsedTime);
-      return;
-    }
-    if (this.cantarellaMotionSystem) {
-      this.cantarellaMotionSystem.update(delta, elapsedTime);
-      return;
-    }
-    if (this.kurumiMotionSystem) {
-      this.kurumiMotionSystem.update(delta, elapsedTime);
-      return;
-    }
-    if (this.mmd) {
-      if (this.mixer) {
-        this.mmd.updateWithMixer(delta, this.mixer);
-      } else {
-        this.mmd.update(delta);
-      }
-    }
-  }
-
-  destroy() {
-    super.destroy();
-    if (motionRouter && motionRouter.activeSystem && motionRouter.activeSystem.adapter === this) {
-      motionRouter.destroy();
-    }
-    if (this.blendMotionSystem) {
-      try {
-        this.blendMotionSystem.destroy();
-      } catch (e) {
-        console.warn('[PmxCharacterAdapter] 销毁 blendMotionSystem 异常:', e);
-      }
-      this.blendMotionSystem = null;
-    }
-    if (this.cantarellaMotionSystem) {
-      try {
-        this.cantarellaMotionSystem.destroy();
-      } catch (e) {
-        console.warn('[PmxCharacterAdapter] 销毁 cantarellaMotionSystem 异常:', e);
-      }
-      this.cantarellaMotionSystem = null;
-    }
-    if (this.kurumiMotionSystem) {
-      try {
-        this.kurumiMotionSystem.destroy();
-      } catch (e) {
-        console.warn('[PmxCharacterAdapter] 销毁 kurumiMotionSystem 异常:', e);
-      }
-      this.kurumiMotionSystem = null;
-    }
-    if (this.mesh) {
-      if (scene) {
-        scene.remove(this.mesh);
-      }
-      if (this.mesh.geometry) {
-        this.mesh.geometry.dispose();
-      }
-      const materials = Array.isArray(this.mesh.material) ? this.mesh.material : [this.mesh.material];
-      for (const mat of materials) {
-        if (mat.map) mat.map.dispose();
-        if (mat.matcap) mat.matcap.dispose();
-        if (mat.gradientMap) mat.gradientMap.dispose();
-        mat.dispose();
-      }
-      this.mesh = null;
-      this.mmd = null;
-    }
-  }
+  playIdleMotion();
+  maybeAutoGreeting();
 }
 
 // --- 3.1 Lifecycle & Scene Cleanup Management ---
@@ -1073,6 +584,7 @@ async function loadCharacter(modelMeta, characterName = '') {
           currentModelUrl = url;
           window.currentAdapter = currentAdapter;
           window.currentModelUrl = currentModelUrl;
+          currentAdapter.mount({ scene, referenceHeadHeight: REFERENCE_HEAD_HEIGHT });
           console.log('✅ PMX model loaded successfully:', mmd);
           if (motionRouter) {
             motionRouter.route(currentAdapter);
@@ -1080,15 +592,9 @@ async function loadCharacter(modelMeta, characterName = '') {
           if (currentAdapter.mixer) {
             currentAnimationMixer = currentAdapter.mixer;
           }
-          if (currentAdapter.isCantarella && currentAdapter.isCantarella()) {
-            updateMotionSelectForCharacter('cantarella');
-          } else if (currentAdapter.isKurumi && currentAdapter.isKurumi()) {
-            updateMotionSelectForCharacter('kurumi');
-          } else if (currentAdapter.isTohru && currentAdapter.isTohru()) {
-            updateMotionSelectForCharacter('tohru');
-          } else {
-            updateMotionSelectForCharacter('pmx');
-          }
+          maybeAutoGreeting();
+          updateMotionSelectForCharacter(currentAdapter);
+          refreshChips(currentAdapter, modelMeta);
 
           if (loadingScreen) {
             loadingStatus.textContent = '加载完成！';
@@ -1150,20 +656,21 @@ async function loadCharacter(modelMeta, characterName = '') {
         cleanupSceneAvatarObjects();
 
         try {
-          currentAdapter = new VrmCharacterAdapter(vrm, url, name, modelMeta.id || characterName || '');
+          currentAdapter = new VrmCharacterAdapter(vrm, url, name, modelMeta.id || characterName || '', { vrmUtils: VRMUtils });
           currentModelUrl = url;
           currentVrm = vrm;
           window.currentAdapter = currentAdapter;
           window.currentVrm = currentVrm;
           window.currentModelUrl = currentModelUrl;
+          dropDisabledNormalMaps(vrm);
+          currentAdapter.mount({ scene, camera, referenceHeadHeight: REFERENCE_HEAD_HEIGHT, vrmUtils: VRMUtils, applyPoseFn: applyNaturalPose });
           console.log('✅ VRM model loaded successfully:', vrm);
           if (motionRouter) {
             motionRouter.route(currentAdapter);
           }
-          if (currentAdapter.mixer) {
-            currentAnimationMixer = currentAdapter.mixer;
-          }
-          updateMotionSelectForCharacter('vrm');
+          setupVrmMotionMixer(currentAdapter);
+          updateMotionSelectForCharacter(currentAdapter);
+          refreshChips(currentAdapter, modelMeta);
 
           if (loadingScreen) {
             loadingStatus.textContent = '加载完成！';
@@ -1218,69 +725,85 @@ function resolveCharacterId(idOrNameOrFile) {
   return null;
 }
 
-function updateMotionSelectForCharacter(characterType = 'vrm') {
+function updateMotionSelectForCharacter(adapterOrType = currentAdapter) {
   const motionSelect = document.getElementById('motion-select');
   if (!motionSelect) return;
 
-  if (characterType === 'cantarella') {
-    motionSelect.innerHTML = `
-      <option value="">🎭 坎特蕾拉专属动作演示...</option>
-      <option value="cantarella_seduce_tongue">💜 魅惑吐舌·声痕显现 (王牌特写)</option>
-      <option value="cantarella_graceful_greeting">🍷 优雅曼妙致意 (贵妇礼仪)</option>
-      <option value="cantarella_alluring_whisper">💋 魅惑邀约·低语 (亲密挑逗)</option>
-      <option value="cantarella_poison_tease">🥀 危险毒药挑逗 (戏谑冷艳)</option>
-      <option value="cantarella_arrogant_turn">👑 冷艳傲然侧身 (回眸睥睨)</option>
-      <option value="gentle_nod">🙇 优雅轻颔首 (倾听)</option>
-      <option value="shake_head">🙅 冷艳微摇头 (否定)</option>
-    `;
-    return;
+  const adapter = typeof adapterOrType === 'object' ? adapterOrType : currentAdapter;
+  const characterType = typeof adapterOrType === 'string' ? adapterOrType : (adapter?.descriptor?.motionGroup || (adapter?.type === 'pmx' ? 'pmx' : 'vrm'));
+
+  const desc = adapter?.descriptor || findCharacterDescriptor(adapter) || findCharacterDescriptor({ characterId: characterType, characterName: characterType });
+
+  // 优先从 adapter.activeMotionClips 派生已就绪的动作名，保证下拉项 100% 可播放，杜绝死项 (P1-4)
+  const availableClips = adapter?.activeMotionClips ? Object.keys(adapter.activeMotionClips) : [];
+
+  let optionsList = [];
+  const labelMap = desc?.motionLabels || DEFAULT_MOTION_LABELS;
+
+  if (availableClips.length > 0) {
+    for (const clipId of availableClips) {
+      if (clipId === 'idle') continue; // 待机循环不放入触发下拉
+      const meta = labelMap[clipId] || { label: clipId, order: 99 };
+      optionsList.push({ value: clipId, label: meta.label, order: meta.order ?? 99 });
+    }
+    optionsList.sort((a, b) => a.order - b.order);
+  } else if (desc?.motionLabels) {
+    for (const [clipId, meta] of Object.entries(desc.motionLabels)) {
+      optionsList.push({ value: clipId, label: meta.label, order: meta.order ?? 99 });
+    }
+    optionsList.sort((a, b) => a.order - b.order);
+  } else {
+    // 兜底通用选项
+    const isPmx = characterType === 'pmx' || adapter?.type === 'pmx';
+    for (const [clipId, meta] of Object.entries(DEFAULT_MOTION_LABELS)) {
+      if (clipId === 'greeting' && isPmx) continue;
+      if (clipId === 'pmx_greeting' && !isPmx) continue;
+      optionsList.push({ value: clipId, label: meta.label, order: meta.order ?? 99 });
+    }
+    optionsList.sort((a, b) => a.order - b.order);
   }
 
-  if (characterType === 'kurumi') {
-    motionSelect.innerHTML = `
-      <option value="">🎭 时崎狂三专属动作演示...</option>
-      <option value="kurumi_curtsy">👗 优雅提裙行礼 (初见致意)</option>
-      <option value="kurumi_tease_whisper">💋 魅惑掩唇低语 (うふふ…)</option>
-      <option value="kurumi_finger_gun">🎯 招牌指枪放电 (Bang~)</option>
-      <option value="kurumi_hair_stroke">🖤 慵懒撩发回眸 (魔女风情)</option>
-      <option value="kurumi_giggle">✨ 狂三优雅轻笑 (轻颤露齿)</option>
-      <option value="gentle_nod">🙇 优雅轻颔首 (倾听)</option>
-      <option value="shake_head">🙅 戏谑轻摇头 (玩味否定)</option>
-      <option value="pout_turn">😤 傲慢侧身回眸 (冷艳)</option>
-    `;
-    return;
+  const titlePrefix = desc ? `🎭 ${desc.name}专属动作演示...` : '🎭 动作演示打样...';
+  let html = `<option value="">${titlePrefix}</option>`;
+  for (const opt of optionsList) {
+    html += `\n      <option value="${opt.value}">${opt.label}</option>`;
   }
+  motionSelect.innerHTML = html;
+}
 
-  if (characterType === 'tohru') {
-    motionSelect.innerHTML = `
-      <option value="">🎭 托尔专属动作演示...</option>
-      <option value="tohru_love_hug">💖 小林狂爱·飞扑拥抱 (小林さーん！)</option>
-      <option value="tohru_tail_meat">🍖 特制尻尾肉·料理邀尝 (爱意满满)</option>
-      <option value="tohru_dragon_roar">🐲 灭世龙威·冷峻怒颜 (威慑人类)</option>
-      <option value="tohru_maid_curtsy">👗 端庄龙女仆·提裙致意 (女仆礼仪)</option>
-      <option value="tohru_happy_bounce">✨ 元气欢呼·雀跃起跳 (开心跳跃)</option>
-      <option value="wave_hand">👋 热情摆手招手 (元气日常)</option>
-      <option value="gentle_nod">🙇 乖巧轻颔首 (倾听小林)</option>
-      <option value="shake_head">🙅 委屈扁嘴轻摇头 (不开心)</option>
-      <option value="pout_turn">😤 傲娇侧身别头 (气鼓鼓)</option>
-    `;
-    return;
-  }
+/**
+ * 刷新快捷动作与对话 Chips (权威级优先级：descriptor.chips > matched.chips)
+ */
+function refreshChips(adapter = currentAdapter, charMeta = null) {
+  const chipsContainer = document.querySelector('.suggestion-chips') || document.querySelector('.dock-chips');
+  if (!chipsContainer) return;
+  chipsContainer.innerHTML = '';
 
-  // 其他角色恢复通用动作菜单
-  motionSelect.innerHTML = `
-    <option value="">🎭 动作演示打样...</option>
-    <option value="${characterType === 'pmx' ? 'pmx_greeting' : 'greeting'}">
-      ${characterType === 'pmx' ? '✨ 全身礼貌致意 (PMX专属)' : '🌟 官方全身打招呼 (Pixiv)'}
-    </option>
-    <option value="wave_hand">👋 轻柔摆手招手 (日常)</option>
-    <option value="shake_head">🙅 轻轻摇头 (傲娇/否定)</option>
-    <option value="gentle_nod">🙇 赞同点头 (倾听)</option>
-    <option value="cheerful_bounce">✨ 喜多元气跳 (开心)</option>
-    <option value="surprise_jump">😲 受惊后缩 (惊讶)</option>
-    <option value="pout_turn">😤 傲娇侧头 (生气)</option>
-    <option value="shy_tilt">💕 歪头害羞 (萌态)</option>
-  `;
+  const charId = adapter?.characterId || charMeta?.id;
+  const matched = charMeta || (charId ? CHARACTER_META[charId] : null);
+
+  const rawChips = adapter?.descriptor?.chips || matched?.chips || [];
+
+  rawChips.forEach((raw) => {
+    const chip = normalizeChip(raw);
+    if (!chip.label) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'chip';
+    btn.setAttribute('data-text', chip.message || chip.label);
+    btn.textContent = chip.label;
+    btn.addEventListener('click', () => {
+      if (chip.action) {
+        if (motionRouter && typeof motionRouter.playMotion === 'function') {
+          motionRouter.playMotion(chip.action);
+        } else if (typeof playMotion === 'function') {
+          playMotion(chip.action);
+        }
+      }
+      sendTextMessage(chip.message || chip.label);
+    });
+    chipsContainer.appendChild(btn);
+  });
 }
 
 function applyCharacterUI(characterIdOrConfig) {
@@ -1297,58 +820,16 @@ function applyCharacterUI(characterIdOrConfig) {
   if (bubbleText) bubbleText.textContent = matched.greeting;
   document.title = `${matched.name} - Open-LLM-VTuber 3D`;
 
-  // Update quick chips
-  const chipsContainer = document.querySelector('.suggestion-chips') || document.querySelector('.dock-chips');
-  if (chipsContainer && matched.chips) {
-    chipsContainer.innerHTML = '';
-    matched.chips.forEach((text) => {
-      const chip = document.createElement('button');
-      chip.className = 'chip';
-      chip.setAttribute('data-text', text);
-      chip.textContent = text;
-      chip.addEventListener('click', () => {
-        if (text.includes('吐舌')) {
-          playMotion('cantarella_seduce_tongue');
-        } else if (text.includes('致意') || text.includes('行礼') || text.includes('提裙')) {
-          playMotion(charId === 'zh_tokisaki_kurumi_01' ? 'kurumi_curtsy' : (charId === 'zh_tohru_01' ? 'tohru_maid_curtsy' : 'cantarella_graceful_greeting'));
-        } else if (text.includes('掩唇') || text.includes('低语') || text.includes('うふふ')) {
-          playMotion(charId === 'zh_tokisaki_kurumi_01' ? 'kurumi_tease_whisper' : 'cantarella_alluring_whisper');
-        } else if (text.includes('指枪') || text.includes('Bang')) {
-          playMotion('kurumi_finger_gun');
-        } else if (text.includes('撩发') || text.includes('回眸')) {
-          playMotion('kurumi_hair_stroke');
-        } else if (text.includes('邀约')) {
-          playMotion('cantarella_alluring_whisper');
-        } else if (text.includes('尻尾') || text.includes('尾巴') || text.includes('肉')) {
-          playMotion('tohru_tail_meat');
-        } else if (text.includes('小林') || text.includes('爱') || text.includes('抱')) {
-          playMotion('tohru_love_hug');
-        } else if (text.includes('ドラゴン') || text.includes('世界') || text.includes('龙')) {
-          playMotion('tohru_dragon_roar');
-        } else if (text.includes('家事') || text.includes('メイド') || text.includes('女仆')) {
-          playMotion('tohru_maid_curtsy');
-        }
-        sendTextMessage(text);
-      });
-      chipsContainer.appendChild(chip);
-    });
-  }
+  // 刷新快捷 Chips（若模型还未挂载完毕先以 matched 兜底渲染，加载完毕后会通过 refreshChips 再次精准刷新）
+  refreshChips(currentAdapter, matched);
 
   // Update input placeholder
   if (textInput) {
     textInput.placeholder = `和${matched.name}聊点什么吧... (按 Enter 发送)`;
   }
 
-  // 同步更新动作打样下拉列表：坎特蕾拉专属动作 / 狂三专属动作 / 托尔专属动作 / PMX专属全身致意 / VRM官方打招呼
-  if (charId === 'zh_cantarella_pmx_01') {
-    updateMotionSelectForCharacter('cantarella');
-  } else if (charId === 'zh_tokisaki_kurumi_01') {
-    updateMotionSelectForCharacter('kurumi');
-  } else if (charId === 'zh_tohru_01') {
-    updateMotionSelectForCharacter('tohru');
-  } else {
-    updateMotionSelectForCharacter(matched.pmx ? 'pmx' : 'vrm');
-  }
+  // 同步更新动作打样下拉列表
+  updateMotionSelectForCharacter(currentAdapter || (matched.pmx ? 'pmx' : 'vrm'));
 
   // Switch character model (VRM or PMX) if different
   const targetModelUrl = matched.vrm || matched.pmx;
@@ -1359,6 +840,7 @@ function applyCharacterUI(characterIdOrConfig) {
 
 // 暴露全局接口与 Getter/Setter 给外部环境（如 Electron 桌宠主进程、自动化测试）
 window.applyCharacterUI = applyCharacterUI;
+window.refreshChips = refreshChips;
 window.updateMotionSelectForCharacter = updateMotionSelectForCharacter;
 window.resolveCharacterId = resolveCharacterId;
 window.loadCharacter = loadCharacter;
@@ -1370,6 +852,7 @@ Object.defineProperty(window, 'currentAdapter', {
   set: (v) => { currentAdapter = v; },
   configurable: true
 });
+window.motionRouter = motionRouter;
 Object.defineProperty(window, 'currentVrm', {
   get: () => currentVrm,
   set: (v) => { currentVrm = v; },
@@ -1684,36 +1167,8 @@ function updateIdle(elapsedTime) {
   head.rotation.x = currentEmotionHeadPitch + Math.sin(t * 1.8) * 0.006;
 
   // VRM T-pose 需要手臂下垂，PMX 自身有自然休止姿态微动
-  if (currentAdapter && currentAdapter.type === 'pmx') {
-    const lShoulder = currentAdapter.resolveBone('leftShoulder');
-    const rShoulder = currentAdapter.resolveBone('rightShoulder');
-    if (lShoulder) lShoulder.rotation.z = -0.05;
-    if (rShoulder) rShoulder.rotation.z = 0.05;
-
-    const name = (currentAdapter.characterName || '').toLowerCase();
-    const isTohru = name.includes('托尔') || name.includes('トール') || name.includes('tohru');
-    const isKurumi = name.includes('狂三') || name.includes('kurumi');
-    const baseZ = isTohru ? 0.50 : (isKurumi ? 0.55 : 0.54);
-
-    const leftUpperArm = currentAdapter.resolveBone('leftUpperArm');
-    if (leftUpperArm) {
-      leftUpperArm.rotation.z = -baseZ - Math.sin(t * 1.8) * 0.008;
-      leftUpperArm.rotation.x = 0.12 + Math.sin(t * 1.8) * 0.005;
-    }
-    const rightUpperArm = currentAdapter.resolveBone('rightUpperArm');
-    if (rightUpperArm) {
-      rightUpperArm.rotation.z = baseZ + Math.sin(t * 1.8) * 0.008;
-      rightUpperArm.rotation.x = 0.12 + Math.sin(t * 1.8) * 0.005;
-    }
-    const leftLowerArm = currentAdapter.resolveBone('leftLowerArm');
-    if (leftLowerArm) {
-      leftLowerArm.rotation.set(0.20, 0.12, -0.22 - Math.sin(t * 1.8) * 0.006);
-    }
-    const rightLowerArm = currentAdapter.resolveBone('rightLowerArm');
-    if (rightLowerArm) {
-      rightLowerArm.rotation.set(0.20, -0.12, 0.22 + Math.sin(t * 1.8) * 0.006);
-    }
-  } else if (!currentAdapter || currentAdapter.restPoseType === 'tpose') {
+  // VRM T-pose 需要手臂下垂（PMX 姿态由独立动作系统及 animationPose 固化全权驱动）
+  if (!currentAdapter || currentAdapter.restPoseType === 'tpose') {
     const leftUpperArm = currentAdapter ? currentAdapter.resolveBone('leftUpperArm') : currentVrm?.humanoid?.getNormalizedBoneNode('leftUpperArm');
     if (leftUpperArm) leftUpperArm.rotation.z = -1.22 - Math.sin(t * 1.8) * 0.012;
 
@@ -2204,6 +1659,7 @@ function playMotion(motionName) {
 window.activeMotionClips = activeMotionClips;
 window.playMotion = playMotion;
 window.playIdleMotion = playIdleMotion;
+window.maybeAutoGreeting = maybeAutoGreeting;
 
 /**
  * 预留语音/台词反馈接口 (Voice & Speech Reaction Interface)
@@ -2816,7 +2272,8 @@ function applyBackgroundTheme(themeKey) {
 function animate() {
   requestAnimationFrame(animate);
 
-  const delta = clock.getDelta();
+  const rawDelta = clock.getDelta();
+  const delta = clampFrameDelta(rawDelta, 0.1);
   const elapsedTime = clock.getElapsedTime();
 
   if (currentAdapter) {

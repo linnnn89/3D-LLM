@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { PMX_MORPH_CANDIDATES, DEFAULT_MORPH_CONFLICT_RULES } from './registry.js';
+
+const warnedMissingChannels = new Set();
 
 /**
  * =========================================================================
@@ -16,7 +19,7 @@ import * as THREE from 'three';
 export class BasePmxMotionSystem {
   constructor(adapter, options = {}) {
     this.adapter = adapter;
-    this.mesh = adapter.getRootNode() || adapter.mesh;
+    this.mesh = adapter.getRootNode ? adapter.getRootNode() : adapter.mesh;
     this.mixer = null;
     this.activeMotionClips = {};
     this.currentIdleAction = null;
@@ -24,15 +27,19 @@ export class BasePmxMotionSystem {
     this.currentMotionName = null;
     this.currentMotionTime = 0.0;
     this.currentMotionFinishedHandler = null;
+    this.disposed = false;
+    this.channelToMorphKey = {};
 
     // 表情与形态键管理核心状态
     this.profile = options.profile || { emotions: {}, actionExpressions: {} };
     this.currentBaseEmotion = 'neutral';
     this.baseEmotionWeight = 1.0;
+    this.savedBaseEmotion = null;
+    this.savedBaseEmotionWeight = 1.0;
     this.activeActionExpression = null;
     this.currentMorphWeights = {};
 
-    // 独立眨眼与口型驱动权重
+    // 独立眨眼与口型驱动权重 (由 setLipSync / setBlink 统一驱动，Sole Writer)
     this.blinkWeight = 0.0;
     this.lipSyncAa = 0.0;
     this.lipSyncOh = 0.0;
@@ -68,13 +75,41 @@ export class BasePmxMotionSystem {
     }
   }
 
+  buildMorphChannelMapping() {
+    this.channelToMorphKey = {};
+    if (!this.mesh || !this.mesh.morphTargetDictionary) return;
+    const dict = this.mesh.morphTargetDictionary;
+    for (const [channel, candidates] of Object.entries(PMX_MORPH_CANDIDATES)) {
+      for (const name of candidates) {
+        if (dict[name] !== undefined) {
+          this.channelToMorphKey[channel] = name;
+          break; // 规则契约：首个命中
+        }
+      }
+    }
+
+    // 校验规则中的通道，若有未命中的通道打一次 warning (使用 Set 去重，绝不进入每帧)
+    const rules = this.adapter?.descriptor?.conflictRules || DEFAULT_MORPH_CONFLICT_RULES;
+    for (const rule of rules) {
+      const channelsToCheck = rule.channels || [rule.primary, rule.target];
+      for (const ch of channelsToCheck) {
+        if (ch && !this.channelToMorphKey[ch] && !warnedMissingChannels.has(ch)) {
+          warnedMissingChannels.add(ch);
+          console.warn(`[BasePmxMotionSystem] 通道 ${ch} 未在模型形态键字典中命中，跳过该规则约束`);
+        }
+      }
+    }
+  }
+
   init() {
+    this.buildMorphChannelMapping();
+    if (typeof this.applyPoseFn === 'function') {
+      this.applyPoseFn(this.adapter);
+    }
     const hips = typeof this.adapter?.resolveBone === 'function' ? this.adapter.resolveBone('hips') : null;
     if (hips) {
       this.initialHipsPosition = hips.position.clone();
-      this.adapter._initialHipsPosition = this.initialHipsPosition;
     }
-    this.applyNaturalPose();
     this.setupMixer();
   }
 
@@ -102,6 +137,7 @@ export class BasePmxMotionSystem {
     }
     this.adapter.activeMotionClips = this.activeMotionClips;
     if (typeof window !== 'undefined' && window.activeMotionClips) {
+      for (const k in window.activeMotionClips) delete window.activeMotionClips[k];
       Object.assign(window.activeMotionClips, this.activeMotionClips);
     }
 
@@ -115,8 +151,6 @@ export class BasePmxMotionSystem {
    */
   resetExpressions(immediate = true) {
     this.activeActionExpression = null;
-    this.currentBaseEmotion = 'neutral';
-    this.baseEmotionWeight = 1.0;
     this.blinkWeight = 0.0;
     this.lipSyncAa = 0.0;
     this.lipSyncOh = 0.0;
@@ -124,23 +158,13 @@ export class BasePmxMotionSystem {
     const dict = this.mesh?.morphTargetDictionary || {};
     const influences = this.mesh?.morphTargetInfluences;
 
-    // 1. 若为立即模式（动作打断切换），强制将底层网格的所有形态键全部彻底归零 (0.0)
-    if (immediate && influences) {
-      if (typeof influences.fill === 'function') {
-        influences.fill(0.0);
-      } else {
-        for (let i = 0; i < influences.length; i++) influences[i] = 0.0;
-      }
-    }
-
-    // 2. 清空内部形态键权重缓存
+    // 1. 清空内部受控形态键的当前缓存与权重
     this.currentMorphWeights = {};
 
-    // 3. 将所有受控形态键权重直接置为 0.0
-    const allMorphs = new Set([...Object.keys(dict), ...this.controlledMorphNames]);
-    for (const mName of allMorphs) {
-      const idx = dict[mName];
+    // 2. 将所有受控形态键彻底归零回原点
+    for (const mName of this.controlledMorphNames) {
       this.currentMorphWeights[mName] = 0.0;
+      const idx = dict[mName];
       if (immediate && influences && idx !== undefined) {
         influences[idx] = 0.0;
       }
@@ -225,11 +249,17 @@ export class BasePmxMotionSystem {
       this.currentMotionAction = null;
     }
 
-    // 2. ★ 立刻归零：立刻将表情形态键清零、骨骼姿态与 hips 位移复位回基准 Natural Pose
+    // 2. 保存当前基础情绪，供动作自然结束时自动回弹恢复
+    if (this.currentBaseEmotion && this.currentBaseEmotion !== 'neutral' && !this.savedBaseEmotion) {
+      this.savedBaseEmotion = this.currentBaseEmotion;
+      this.savedBaseEmotionWeight = this.baseEmotionWeight;
+    }
+
+    // 3. ★ 立刻归零：立刻将表情形态键清零、骨骼姿态与 hips 位移复位回基准 Natural Pose
     this.resetExpressions(true);
     this.resetPose();
 
-    // 3. 然后再开始第二个动作
+    // 4. 然后再开始第二个动作
     this.currentMotionName = actualMotion;
     this.currentMotionTime = 0.0;
 
@@ -242,7 +272,7 @@ export class BasePmxMotionSystem {
       this.activeActionExpression = null;
     }
 
-    // 4. 动画轨道初始化与启动
+    // 5. 动画轨道初始化与启动
     const action = this.mixer.clipAction(clip);
     action.stop();
     action.reset();
@@ -262,9 +292,9 @@ export class BasePmxMotionSystem {
     action.play();
     this.currentMotionAction = action;
 
-    // 5. ★ 动作播放完毕自动退场守卫：淡出并恢复原点与待机
+    // 6. ★ 动作播放完毕自动退场守卫：淡出并恢复原点与待机
     const onFinished = (e) => {
-      if (e.action !== action) return;
+      if (e && e.action && e.action !== action) return;
       this.mixer.removeEventListener('finished', onFinished);
       if (this.currentMotionFinishedHandler === onFinished) this.currentMotionFinishedHandler = null;
       if (this.currentMotionAction !== action) return;
@@ -276,6 +306,13 @@ export class BasePmxMotionSystem {
       // 动作自然播放完，平滑恢复原点
       this.resetExpressions(false);
       this.resetPose();
+
+      // ★ 自动恢复动作前保存的基础人设情绪 (happy / angry / etc.)
+      if (this.savedBaseEmotion) {
+        this.currentBaseEmotion = this.savedBaseEmotion;
+        this.baseEmotionWeight = this.savedBaseEmotionWeight || 1.0;
+        this.savedBaseEmotion = null;
+      }
 
       action.fadeOut(0.35);
       if (this.currentIdleAction) {
@@ -292,6 +329,10 @@ export class BasePmxMotionSystem {
     const p = validPresets.includes(preset) ? preset : 'neutral';
     this.currentBaseEmotion = p;
     this.baseEmotionWeight = weight;
+    if (this.currentMotionAction) {
+      this.savedBaseEmotion = p;
+      this.savedBaseEmotionWeight = weight;
+    }
     console.log(`[BasePmxMotion] 🎭 人设表情: ${p} (强度: ${weight})`);
   }
 
@@ -305,6 +346,8 @@ export class BasePmxMotionSystem {
   }
 
   update(delta, elapsedTime) {
+    if (this.disposed) return;
+
     if (this.adapter && this.adapter.mmd) {
       if (this.mixer) {
         this.adapter.mmd.updateWithMixer(delta, this.mixer);
@@ -318,15 +361,24 @@ export class BasePmxMotionSystem {
     this.updateFacialExpressions(delta);
   }
 
+  /**
+   * =========================================================================
+   * 形态键更新执行流水线 (严格顺序保证，严禁颠倒)：
+   * 步骤 1: 人设基准情绪 / 动作专属表情独占计算并写入 targetWeights
+   * 步骤 2: 形态键互斥裁决器 (resolveMorphConflicts) 消除相对立拉伸 (大者胜 / 相减)
+   * 步骤 3: 实时自主眨眼通道合并 (Math.max 合并)
+   * 步骤 4: 语音嘴型驱动 (LipSync) 计算
+   * 步骤 5: 单级直通与平滑阻尼更新 (口型单级直通零衰减覆盖；情绪与眨眼平滑阻尼)
+   * =========================================================================
+   */
   updateFacialExpressions(delta) {
-    if (!this.mesh || !this.mesh.morphTargetDictionary || !this.mesh.morphTargetInfluences) return;
+    if (this.disposed || !this.mesh || !this.mesh.morphTargetDictionary || !this.mesh.morphTargetInfluences) return;
     const dict = this.mesh.morphTargetDictionary;
     const influences = this.mesh.morphTargetInfluences;
 
     const targetWeights = {};
 
-    // ★ 关键防护：动作专属表情与基准情绪绝对互斥！
-    // 当动作专属表情激活时，动作表情拥有 100% 独占权，严禁基础情绪 (happy/sad/angry等) 的形态键混入叠加产生畸变！
+    // 步骤 1: 动作专属表情与基准情绪独占计算
     if (this.activeActionExpression) {
       for (const [mName, w] of Object.entries(this.activeActionExpression)) {
         targetWeights[mName] = w;
@@ -339,39 +391,47 @@ export class BasePmxMotionSystem {
       }
     }
 
-    // 2. 形态键互斥裁决与防撕裂约束
+    // 步骤 2: 形态键互斥裁决与防撕裂约束 (规则引擎驱动)
     this.resolveMorphConflicts(targetWeights);
 
-    // 3. 眨眼叠加 (まばたき 或 Eye_close)
-    if (this.blinkWeight > 0.001) {
-      const blinkKey = dict['まばたき'] !== undefined ? 'まばたき' : (dict['Eye_close'] !== undefined ? 'Eye_close' : null);
-      if (blinkKey) {
-        targetWeights[blinkKey] = Math.max(targetWeights[blinkKey] || 0.0, this.blinkWeight);
-      }
+    // 步骤 3: 眨眼叠加 (基于规范化通道映射，回落到字面量)
+    const blinkKey = this.channelToMorphKey['blink'] || (dict['まばたき'] !== undefined ? 'まばたき' : (dict['Eye_close'] !== undefined ? 'Eye_close' : null));
+    if (this.blinkWeight > 0.001 && blinkKey) {
+      targetWeights[blinkKey] = Math.max(targetWeights[blinkKey] || 0.0, this.blinkWeight);
     }
 
-    // 4. 语音嘴型驱动 (あ / Mouth_ah)
-    if (typeof window !== 'undefined' && window.isPlayingAudio) {
-      const mouthKey = dict['あ'] !== undefined ? 'あ' : (dict['口_あ'] !== undefined ? '口_あ' : (dict['Mouth_ah'] !== undefined ? 'Mouth_ah' : null));
-      if (mouthKey && this.lipSyncAa > 0.01) {
-        targetWeights[mouthKey] = this.lipSyncAa;
-      }
+    // 步骤 4: 语音嘴型驱动 (aa 与 oh 通道)
+    const mouthKey = this.channelToMorphKey['aa'] || (dict['あ'] !== undefined ? 'あ' : (dict['口_あ'] !== undefined ? '口_あ' : (dict['Mouth_ah'] !== undefined ? 'Mouth_ah' : null)));
+    if (mouthKey && this.lipSyncAa > 0.001) {
+      targetWeights[mouthKey] = Math.max(targetWeights[mouthKey] || 0.0, this.lipSyncAa);
+    }
+    const mouthOhKey = this.channelToMorphKey['oh'] || (dict['お'] !== undefined ? 'お' : (dict['口_お'] !== undefined ? '口_お' : (dict['Mouth_oh'] !== undefined ? 'Mouth_oh' : null)));
+    if (mouthOhKey && this.lipSyncOh > 0.001) {
+      targetWeights[mouthOhKey] = Math.max(targetWeights[mouthOhKey] || 0.0, this.lipSyncOh);
     }
 
-    // 5. 毫秒级阻尼插值更新形态键
-    const speed = 12.0;
-    const isPlaying = typeof window !== 'undefined' && !!window.isPlayingAudio;
+    // 步骤 5: 单级直通与平滑阻尼更新
+    const aaCandidates = PMX_MORPH_CANDIDATES['aa'] || [];
+    const ohCandidates = PMX_MORPH_CANDIDATES['oh'] || [];
+    const blinkCandidates = PMX_MORPH_CANDIDATES['blink'] || [];
 
     for (const mName of this.controlledMorphNames) {
       const idx = dict[mName];
       if (idx === undefined) continue;
 
-      if (isPlaying && (mName === 'あ' || mName === '口_あ' || mName === 'Mouth_ah')) {
-        influences[idx] = targetWeights[mName] || 0.0;
+      const target = targetWeights[mName] || 0.0;
+
+      const isMouth = (mName === mouthKey || mName === mouthOhKey || aaCandidates.includes(mName) || ohCandidates.includes(mName));
+      if (isMouth) {
+        // 单级滤波闭环：app.js 已执行频域平滑，底层直跟目标，消除级联衰减导致的不张嘴
+        this.currentMorphWeights[mName] = target;
+        influences[idx] = target;
         continue;
       }
 
-      const target = targetWeights[mName] || 0.0;
+      const isBlink = (mName === blinkKey || blinkCandidates.includes(mName));
+      const speed = isBlink ? 24.0 : 12.0;
+
       const current = this.currentMorphWeights[mName] || 0.0;
       const next = THREE.MathUtils.damp(current, target, speed, delta);
       this.currentMorphWeights[mName] = next;
@@ -380,61 +440,71 @@ export class BasePmxMotionSystem {
   }
 
   /**
-   * ★ 形态键互斥裁决器：消除相对立拉伸的形态键同时为正值，杜绝面部多边形反向撕裂畸变
+   * ★ 形态键互斥裁决器：由规范化通道规则驱动，消除相对立拉伸，杜绝面部多边形反向撕裂畸变
    */
   resolveMorphConflicts(weights) {
     if (!weights) return;
-    // 1. 嘴角反向互斥 (口角上げ vs 口角下げ)
-    if (weights['口角上げ'] > 0 && weights['口角下げ'] > 0) {
-      if (weights['口角上げ'] >= weights['口角下げ']) {
-        weights['口角下げ'] = 0.0;
-      } else {
-        weights['口角上げ'] = 0.0;
+    const rules = this.adapter?.descriptor?.conflictRules || DEFAULT_MORPH_CONFLICT_RULES;
+    for (const rule of rules) {
+      if (rule.mode === 'winner_takes_all' && Array.isArray(rule.channels)) {
+        const [chA, chB] = rule.channels;
+        const keyA = this.channelToMorphKey[chA] || chA;
+        const keyB = this.channelToMorphKey[chB] || chB;
+        if (weights[keyA] > 0 && weights[keyB] > 0) {
+          if (weights[keyA] >= weights[keyB]) {
+            weights[keyB] = 0.0;
+          } else {
+            weights[keyA] = 0.0;
+          }
+        }
+      } else if (rule.mode === 'subtract' && rule.primary && rule.target) {
+        const keyPrim = this.channelToMorphKey[rule.primary] || rule.primary;
+        const keyTgt = this.channelToMorphKey[rule.target] || rule.target;
+        if (weights[keyPrim] > 0 && weights[keyTgt] > 0) {
+          weights[keyTgt] = Math.max(0.0, weights[keyTgt] - weights[keyPrim]);
+        }
       }
-    }
-    // 2. 眉毛情绪互斥 (怒り vs 困る)
-    if (weights['怒り'] > 0 && weights['困る'] > 0) {
-      if (weights['怒り'] >= weights['困る']) {
-        weights['困る'] = 0.0;
-      } else {
-        weights['怒り'] = 0.0;
-      }
-    }
-    // 3. 狂三眼部互斥 (Eye_angry vs Eye_sorrow)
-    if (weights['Eye_angry'] > 0 && weights['Eye_sorrow'] > 0) {
-      if (weights['Eye_angry'] >= weights['Eye_sorrow']) {
-        weights['Eye_sorrow'] = 0.0;
-      } else {
-        weights['Eye_angry'] = 0.0;
-      }
-    }
-    // 4. 狂三嘴角互斥 (Mouth_smile vs Mouth_angry)
-    if (weights['Mouth_smile'] > 0 && weights['Mouth_angry'] > 0) {
-      if (weights['Mouth_smile'] >= weights['Mouth_angry']) {
-        weights['Mouth_angry'] = 0.0;
-      } else {
-        weights['Mouth_smile'] = 0.0;
-      }
-    }
-    // 5. 闭眼与眨眼防过度拉伸 (笑い + まばたき)
-    if (weights['笑い'] > 0 && weights['まばたき'] > 0) {
-      weights['まばたき'] = Math.max(0.0, weights['まばたき'] - weights['笑い']);
     }
   }
 
   destroy() {
+    if (this.disposed) return;
+    this.disposed = true;
+
     if (this.mixer) {
       this.mixer.stopAllAction();
       if (this.currentMotionFinishedHandler) {
         this.mixer.removeEventListener('finished', this.currentMotionFinishedHandler);
         this.currentMotionFinishedHandler = null;
       }
+      if (this.mesh) {
+        try {
+          this.mixer.uncacheRoot(this.mesh);
+        } catch (e) {
+          console.warn('[BasePmxMotion] uncacheRoot failed:', e);
+        }
+      }
+      if (this.activeMotionClips) {
+        for (const clip of Object.values(this.activeMotionClips)) {
+          if (clip) {
+            try {
+              this.mixer.uncacheClip(clip);
+            } catch (e) {}
+          }
+        }
+      }
       this.mixer = null;
+    }
+    const influences = this.mesh?.morphTargetInfluences;
+    if (influences && typeof influences.fill === 'function') {
+      influences.fill(0.0);
     }
     this.activeMotionClips = {};
     this.currentIdleAction = null;
     this.currentMotionAction = null;
     this.currentMotionName = null;
     this.activeActionExpression = null;
+    this.mesh = null;
+    this.adapter = null;
   }
 }
