@@ -1,17 +1,7 @@
 /*
- * Open-LLM-VTuber 3D VRM 桌宠壳 —— Electron 初版（技术验证）
- *
- * 与 doc/desktop_pet_ui_design_20260918.md 的对应关系：
- *   §2.1  窗口参数：transparent / frame:false / focusable:false / skipTaskbar / 不可拉伸
- *   §4    拖动：主进程 setPosition，不用 app-region
- *   §5.2  z-order：alwaysOnTop('screen-saver') + skipTaskbar
- *   §8    WS 仍在渲染器内（本版不动），窗口尺寸变化走 §11.1 的实验
- *   §11.1 ★ 实验：resizable:false 保透明 + 重置 min/max 后 setSize 是否生效
- *
- * 明确不做（留给后续版本）：
- *   - 局部点击穿透（hover 预切换 setIgnoreMouseEvents）
- *   - 独立 Chat 窗口 / 全局快捷键
- *   - 全屏应用检测
+ * 3D-LLM 的 Windows Electron Host。
+ * 窗口编排保留在此处；后端进程、持久状态、日志、快捷键和命中穿透
+ * 分别位于 ./host，Renderer 与 Host 通过 preload 和 protocol/desktop-bridge.schema.json 通信。
  */
 
 'use strict'
@@ -30,8 +20,11 @@ const {
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
-const net = require('node:net')
-const { spawn } = require('node:child_process')
+const { createBackendSupervisor } = require('./host/backend-supervisor')
+const { createAppState } = require('./host/app-state')
+const { createLogger } = require('./host/logger')
+const { createShortcutManager } = require('./host/shortcut-manager')
+const { createHitTestBridge } = require('./host/hit-test-bridge')
 
 const PROJECT_ROOT = path.resolve(__dirname, '..')
 const HOST = '127.0.0.1'
@@ -71,26 +64,10 @@ let currentFraming = 'full'
 let avatarWindow = null
 /** @type {Tray|null} */
 let tray = null
-/** @type {import('node:child_process').ChildProcess|null} */
-let backendProcess = null
-let backendStartedByUs = false
 let currentSize = 'medium'
 let dragState = null
 let overlayCss = ''
 let quitting = false
-
-// —— 局部点击穿透状态 ——
-// 目标：只有「角色身体」那块区域接收鼠标，其余透明区域一律穿透到下层窗口。
-// 命中判定来自渲染器（预加载脚本读 canvas.style.cursor），见 preload.js。
-let clickThroughEnabled = true
-let pointerAlive = false // 收到过真实 pointermove —— 证明 forward 转发可用，才敢开启穿透
-// 注意初值必须是 true：窗口创建后实际处于「可交互（未开启穿透）」状态，
-// 若这里写 false，onHoverState 的未命中分支会在 `if (!isInteractive) return` 处
-// 直接返回，导致永远切不到穿透 —— 直到鼠标先进角色再离开为止。
-let isInteractive = true
-let hoverSynced = false // 是否已按真实命中状态同步过一次
-let leaveTicks = 0
-const LEAVE_TICKS_TO_DISABLE = 3 // 连续 3 次未命中（约 300ms）才恢复穿透，抑制边缘抖动
 
 // —— 调整大小模式 ——
 // 设计要点：拖动期间**完全不碰角色窗口**，只画一层独立的「拉伸框」窗口。
@@ -127,140 +104,23 @@ let currentCharacterId = ''
 
 // ---------------------------------------------------------------- 日志
 
-function log(message) {
-  const line = `${new Date().toISOString()} ${message}`
-  console.log(line)
-  try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true })
-    fs.appendFileSync(LOG_FILE, line + '\n')
-  } catch {
-    /* 日志失败不影响主流程 */
+const log = createLogger(LOG_FILE)
+
+// ---------------------------------------------------------------- 后端与状态
+const { isPortOpen, startBackend, waitForBackend, stopBackend } = createBackendSupervisor({
+  projectRoot: PROJECT_ROOT, host: HOST, port: PORT, log
+})
+const { loadPetState, savePetState, restoreSavedBounds } = createAppState({ app, screen, log })
+const hitTestBridge = createHitTestBridge({
+  getWindow: () => avatarWindow,
+  isFullUi: () => FULL_UI,
+  isDragging: () => Boolean(dragState),
+  log,
+  onPreferenceChanged: () => {
+    refreshTrayMenu()
+    pushSettingsState()
   }
-}
-
-// ---------------------------------------------------------------- 后端
-
-function isPortOpen() {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host: HOST, port: PORT })
-    let settled = false
-    const done = (ok) => {
-      if (settled) return
-      settled = true
-      socket.destroy()
-      resolve(ok)
-    }
-    socket.once('connect', () => done(true))
-    socket.once('error', () => done(false))
-    socket.setTimeout(800, () => done(false))
-  })
-}
-
-function resolvePythonLauncher() {
-  const venvPython = path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe')
-  if (fs.existsSync(venvPython)) {
-    return { command: venvPython, args: [] }
-  }
-  return { command: 'uv', args: ['run', 'python'] }
-}
-
-function startBackend() {
-  const { command, args } = resolvePythonLauncher()
-  log(`[backend] 拉起 ${command} run_server.py`)
-  backendProcess = spawn(command, [...args, 'run_server.py'], {
-    cwd: PROJECT_ROOT,
-    windowsHide: true, // 不弹 CMD 黑窗
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
-  })
-  backendStartedByUs = true
-
-  const forward = (stream, tag) => {
-    stream.setEncoding('utf8')
-    stream.on('data', (chunk) => {
-      const text = String(chunk).trim()
-      if (text) log(`[backend:${tag}] ${text}`)
-    })
-  }
-  forward(backendProcess.stdout, 'out')
-  forward(backendProcess.stderr, 'err')
-
-  backendProcess.on('error', (error) => {
-    log(`[backend] 启动失败: ${error.message}`)
-    backendProcess = null
-  })
-  backendProcess.on('exit', (code, signal) => {
-    log(`[backend] 已退出 code=${code} signal=${signal}`)
-    backendProcess = null
-  })
-}
-
-async function waitForBackend(timeoutMs = 90000) {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await isPortOpen()) return true
-    await new Promise((resolve) => setTimeout(resolve, 700))
-  }
-  return false
-}
-
-function stopBackend() {
-  if (backendStartedByUs && backendProcess) {
-    log('[backend] 关闭由本进程拉起的后端')
-    try {
-      backendProcess.kill()
-    } catch (error) {
-      log(`[backend] 关闭异常: ${error.message}`)
-    }
-    backendProcess = null
-  }
-}
-
-// ---------------------------------------------------------------- 状态持久化
-
-function petStateFile() {
-  return path.join(app.getPath('userData'), 'pet-state.json')
-}
-
-function loadPetState() {
-  try {
-    return JSON.parse(fs.readFileSync(petStateFile(), 'utf8'))
-  } catch {
-    return {}
-  }
-}
-
-function savePetState(patch) {
-  try {
-    const next = { ...loadPetState(), ...patch }
-    fs.mkdirSync(path.dirname(petStateFile()), { recursive: true })
-    fs.writeFileSync(petStateFile(), JSON.stringify(next, null, 2))
-  } catch (error) {
-    log(`[state] 保存失败: ${error.message}`)
-  }
-}
-
-/** 取上次保存且仍在某个显示器工作区内的尺寸 */
-function restoreSavedBounds() {
-  const saved = loadPetState().bounds
-  if (!saved || !Number.isFinite(saved.width) || !Number.isFinite(saved.height)) return null
-  if (saved.width < 160 || saved.height < 160) return null
-
-  const target = {
-    x: Number.isFinite(saved.x) ? saved.x : 0,
-    y: Number.isFinite(saved.y) ? saved.y : 0,
-    width: Math.round(saved.width),
-    height: Math.round(saved.height)
-  }
-  const display = screen.getDisplayMatching(target)
-  if (!display) return null
-
-  // 夹回工作区，避免上次在副屏保存、这次副屏没插
-  const work = display.workArea
-  target.x = Math.min(Math.max(target.x, work.x), work.x + work.width - target.width)
-  target.y = Math.min(Math.max(target.y, work.y), work.y + work.height - target.height)
-  return target
-}
+})
 
 // ---------------------------------------------------------------- 渲染冻结
 //
@@ -479,10 +339,7 @@ function createAvatarWindow() {
 
   // 重置穿透状态：新窗口先整窗可交互，等确认 forward 转发可用后，
   // 才会切到「只有角色挡住鼠标」。这样最坏情况也只是回到旧行为，不会把角色点不动。
-  pointerAlive = false
-  isInteractive = true // 与窗口真实状态一致（未调用 setIgnoreMouseEvents）
-  hoverSynced = false
-  leaveTicks = 0
+  hitTestBridge.resetWindowState()
 
   // §11.1 实验：解锁 min/max，使程序化 setSize 有生效的可能（透明不受影响）
   applySizeUnlock('窗口创建')
@@ -810,8 +667,8 @@ function refreshTrayMenu() {
       {
         label: '点击穿透',
         type: 'checkbox',
-        checked: clickThroughEnabled,
-        click: (item) => setClickThroughEnabled(item.checked)
+        checked: hitTestBridge.isEnabled(),
+        click: (item) => hitTestBridge.setEnabled(item.checked)
       },
       {
         label: '始终置顶',
@@ -855,105 +712,13 @@ function popupAvatarMenu() {
   ]).popup({ window: avatarWindow })
 }
 
-// ---------------------------------------------------------------- 局部点击穿透
-
-/**
- * 切换窗口是否忽略鼠标事件。
- *
- * forward:true 是**必须**的 —— 窗口穿透后仍要把 mousemove 转发给页面，
- * 否则页面里的 raycast 永远不会再跑，就再也收不到「鼠标进入角色」的信号，
- * 形成死锁（鼠标永远无法把角色变回可交互）。
- */
-function applyIgnoreMouseEvents(ignore) {
-  if (FULL_UI) return
-  if (!avatarWindow || avatarWindow.isDestroyed()) return
-  try {
-    if (ignore) {
-      avatarWindow.setIgnoreMouseEvents(true, { forward: true })
-    } else {
-      avatarWindow.setIgnoreMouseEvents(false)
-    }
-  } catch (error) {
-    log(`[hit] setIgnoreMouseEvents 失败: ${error.message}`)
-  }
-}
-
-/** 恢复到「透明区域穿透」的默认状态 */
-function restoreClickThrough(reason) {
-  if (FULL_UI) return
-  isInteractive = false
-  leaveTicks = 0
-  applyIgnoreMouseEvents(true)
-  if (reason) log(`[hit] ${reason} → 恢复穿透`)
-}
-
-function onHoverState(hovering) {
-  if (FULL_UI) return
-  if (!avatarWindow || avatarWindow.isDestroyed()) return
-  if (!clickThroughEnabled) return
-  if (dragState) return // 拖动过程中不要切换穿透，否则会把拖动打断
-  // 只有确认过 mouse move 转发可用，才允许把窗口切成穿透（防死锁）
-  if (!pointerAlive) return
-
-  // 通道打通后的第一次上报：直接按真实命中状态同步，不走宽限期。
-  // 否则启动后会有一小段时间仍在阻挡下层窗口（就是这里漏过一次的 bug）。
-  if (!hoverSynced) {
-    hoverSynced = true
-    if (hovering) {
-      isInteractive = true
-      leaveTicks = 0
-      applyIgnoreMouseEvents(false)
-      log('[hit] 初始同步：鼠标在角色上 → 保持可交互')
-    } else {
-      restoreClickThrough('初始同步：鼠标不在角色上')
-    }
-    return
-  }
-
-  if (hovering) {
-    leaveTicks = 0
-    if (!isInteractive) {
-      isInteractive = true
-      applyIgnoreMouseEvents(false)
-      log('[hit] 鼠标进入角色 → 取消穿透')
-    }
-  } else {
-    if (!isInteractive) return
-    leaveTicks += 1
-    if (leaveTicks >= LEAVE_TICKS_TO_DISABLE) {
-      restoreClickThrough('鼠标离开角色')
-    }
-  }
-}
-
-/** 托盘开关：关闭时整窗恢复可交互（诊断用 / 用户偏好） */
-function setClickThroughEnabled(enabled) {
-  if (FULL_UI) return
-  clickThroughEnabled = enabled
-  log(`[hit] 点击穿透 ${enabled ? '已开启' : '已关闭'}`)
-  if (!enabled) {
-    isInteractive = true
-    leaveTicks = 0
-    applyIgnoreMouseEvents(false)
-  } else if (pointerAlive) {
-    restoreClickThrough('重新开启穿透')
-  }
-  refreshTrayMenu()
-  pushSettingsState()
-}
-
 // ---------------------------------------------------------------- IPC
 
 ipcMain.on('avatar:log', (_event, message) => log(String(message)))
 
-ipcMain.on('avatar:hover-state', (_event, hovering) => onHoverState(Boolean(hovering)))
+ipcMain.on('avatar:hover-state', (_event, hovering) => hitTestBridge.onHoverState(Boolean(hovering)))
 
-ipcMain.on('avatar:pointer-alive', () => {
-  if (FULL_UI) return
-  if (pointerAlive) return
-  pointerAlive = true
-  log('[hit] 已确认 mouse move 转发可用（focusable:false 下鼠标事件可达）→ 启用点击穿透')
-})
+ipcMain.on('avatar:pointer-alive', () => hitTestBridge.markPointerAlive())
 
 // —— 调整大小模式 ——
 
@@ -1293,7 +1058,7 @@ function currentSettingsState() {
     height: bounds.height,
     preset: currentSize,
     framing: currentFraming,
-    clickThrough: clickThroughEnabled,
+    clickThrough: hitTestBridge.isEnabled(),
     alwaysOnTop: alive ? avatarWindow.isAlwaysOnTop() : false,
     shortcutsOk: shortcuts.resize && shortcuts.settings && shortcuts.chat
   }
@@ -1354,7 +1119,7 @@ ipcMain.on('settings:action', (_event, payload) => {
       applyFraming(payload.key)
       break
     case 'clickThrough':
-      setClickThroughEnabled(Boolean(payload.value))
+      hitTestBridge.setEnabled(Boolean(payload.value))
       break
     case 'alwaysOnTop':
       if (avatarWindow && !avatarWindow.isDestroyed()) {
@@ -1380,28 +1145,17 @@ ipcMain.on('settings:action', (_event, payload) => {
 
 // ---------------------------------------------------------------- 全局快捷键
 
-const shortcuts = { resize: false, settings: false, chat: false }
-
-function registerShortcuts() {
-  // globalShortcut 是系统级独占的，被别的软件占用时会静默失败 —— 必须记下来，
-  // 否则托盘菜单里显示了一个按不出效果的快捷键。
-  try {
-    shortcuts.resize = globalShortcut.register('CommandOrControl+Shift+R', () => {
-      if (resizeFrameWindow) exitResizeMode(false)
-      else enterResizeMode()
-    })
-    shortcuts.settings = globalShortcut.register('CommandOrControl+Shift+S', openSettingsWindow)
-    shortcuts.chat = globalShortcut.register('CommandOrControl+Shift+Space', toggleChatWindow)
-  } catch (error) {
-    log(`[shortcut] 注册异常: ${error.message}`)
-  }
-  log(
-    `[shortcut] Ctrl+Shift+R=${shortcuts.resize ? 'ok' : '失败'} ` +
-      `Ctrl+Shift+S=${shortcuts.settings ? 'ok' : '失败'} ` +
-      `Ctrl+Shift+Space=${shortcuts.chat ? 'ok' : '失败'}`
-  )
-  refreshTrayMenu() // 注册结果决定是否显示快捷键提示，需重绘一次
-}
+const { shortcuts, registerShortcuts } = createShortcutManager({
+  globalShortcut,
+  log,
+  onResize: () => {
+    if (resizeFrameWindow) exitResizeMode(false)
+    else enterResizeMode()
+  },
+  onSettings: openSettingsWindow,
+  onChat: toggleChatWindow,
+  onRegistered: refreshTrayMenu
+})
 
 // ---------------------------------------------------------------- 生命周期
 

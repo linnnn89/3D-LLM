@@ -1,0 +1,2 @@
+# Preserve the vendored 2D build artifacts byte-for-byte on every platform.
+/frontend/** -text

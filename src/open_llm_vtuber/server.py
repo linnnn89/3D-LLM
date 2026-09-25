@@ -15,7 +15,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response, RedirectResponse
 from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 
-from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route
+from .routes import init_client_ws_route, init_webtool_routes
 from .settings_router import init_settings_routes
 from .service_context import ServiceContext
 from .config_manager.utils import Config
@@ -73,7 +73,6 @@ class AvatarStaticFiles(CORSStaticFiles):
 #      - /client-ws -> init_client_ws_route (主客户端长连接)
 #      - /web-tool  -> init_webtool_routes (前端配置与模型选择工具)
 #      - /settings  -> init_settings_routes (配置持久化与热更新)
-#      - /proxy-ws  -> init_proxy_route (多客户端/桌宠单信道多路复用)
 #   3. 静态资产托管：按特定优先级挂载缓存与模型资源（最后挂载 / 兜底前端）。
 # 高危注意:
 #   - 静态目录挂载顺序敏感：/ 必须最后 mount，否则会遮蔽其他特定前缀路径。
@@ -83,8 +82,8 @@ class WebSocketServer:
     """
     API server for Open-LLM-VTuber. This contains the websocket endpoint for the client, hosts the web tool, and serves static files.
 
-    Creates and configures a FastAPI app, registers all routes
-    (WebSocket, web tools, proxy) and mounts static assets with CORS.
+    Creates and configures a FastAPI app, registers the WebSocket and web tool
+    routes, and mounts static assets with CORS.
 
     Args:
         config (Config): Application configuration containing system settings.
@@ -125,17 +124,6 @@ class WebSocketServer:
             init_settings_routes(default_context_cache=self.default_context_cache),
         )
 
-        # [代理多路复用路由] 当开启 enable_proxy 时向同一端口内的 /client-ws 建立内部转发桥
-        system_config = config.system_config
-        if hasattr(system_config, "enable_proxy") and system_config.enable_proxy:
-            # Construct the server URL for the proxy
-            host = system_config.host
-            port = system_config.port
-            server_url = f"ws://{host}:{port}/client-ws"
-            self.app.include_router(
-                init_proxy_route(server_url=server_url),
-            )
-
         # Mount cache directory first (to ensure audio file access)
         if not os.path.exists("cache"):
             os.makedirs("cache")
@@ -156,6 +144,7 @@ class WebSocketServer:
             CORSStaticFiles(directory="backgrounds"),
             name="backgrounds",
         )
+        os.makedirs("avatars", exist_ok=True)
         self.app.mount(
             "/avatars",
             AvatarStaticFiles(directory="avatars"),

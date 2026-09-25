@@ -497,11 +497,3 @@ character_config:
         region: 'ap-guangzhou'
         source_lang: 'zh'
         target_lang: 'ja'
-
-# Live Streaming Integration
-live_config:
-  bilibili_live:
-    # List of BiliBili live room IDs to monitor
-    room_ids: [1991478060]
-    # SESSDATA cookie value (optional, for authenticated requests)
-    sessdata: ""

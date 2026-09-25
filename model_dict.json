@@ -26,5 +26,14 @@
                 "": 1
             }
         }
+    },
+    {
+        "name": "胡桃",
+        "description": "Hu Tao",
+        "url": "/live2d-models/胡桃/Hu Tao.model3.json",
+        "kScale": 0.5,
+        "initialXshift": 0,
+        "initialYshift": 0,
+        "emotionMap": {}
     }
 ]

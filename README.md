@@ -274,6 +274,8 @@ Open-LLM-VTuber/
 │   ├── motions/                 # 外部 .vrma 动捕资产与待机动作
 │   └── README.md
 │
+├── frontend/                    # 本仓库内置的 2D Live2D 构建产物（挂载于 /）
+│
 ├── pmx_motion/                  # PMX 专属动作与姿态驱动系统
 │   ├── index.js                 # A-Pose 休止姿态矫正、CCDIK 逆运动学求解、专属程序化动作
 │   └── README.md

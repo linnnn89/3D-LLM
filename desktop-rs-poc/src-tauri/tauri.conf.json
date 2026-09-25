@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "3D LLM Rust POC",
+  "version": "0.1.0",
+  "identifier": "dev.3dllm.rustpoc",
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": { "capabilities": ["avatar-remote"] }
+  },
+  "bundle": { "active": false, "icon": [] }
+}

@@ -16,6 +16,9 @@ from ..tts.tts_interface import TTSInterface
 from ..utils.stream_audio import prepare_audio_payload
 
 
+PLAYBACK_ACK_GRACE_SECONDS = 30
+
+
 # =============================================================================
 # [架构导航 / 辅助节点] 对话数据转换与多模态输出处理器 (Conversation Utils)
 # =============================================================================
@@ -82,7 +85,9 @@ async def process_agent_output(
                 translate_engine,
             )
         elif isinstance(output, AudioOutput):
-            full_response = await handle_audio_output(output, websocket_send)
+            full_response = await handle_audio_output(
+                output, websocket_send, tts_manager
+            )
         else:
             logger.warning(f"Unknown output type: {type(output)}")
     except Exception as e:
@@ -131,6 +136,7 @@ async def handle_sentence_output(
 async def handle_audio_output(
     output: AudioOutput,
     websocket_send: WebSocketSend,
+    tts_manager: TTSTaskManager,
 ) -> str:
     """Process and send AudioOutput directly to the client"""
     full_response = ""
@@ -140,7 +146,9 @@ async def handle_audio_output(
             audio_path=audio_path,
             display_text=display_text,
             actions=actions.to_dict() if actions else None,
+            include_playback_duration=True,
         )
+        tts_manager.record_audio_payload(audio_payload)
         await websocket_send(json.dumps(audio_payload))
     return full_response
 
@@ -190,15 +198,34 @@ async def finalize_conversation_turn(
     """Finalize a conversation turn"""
     if tts_manager.task_list:
         await asyncio.gather(*tts_manager.task_list)
-        await websocket_send(json.dumps({"type": "backend-synth-complete"}))
+    await tts_manager.wait_for_delivery()
 
-        response = await message_handler.wait_for_response(
-            client_uid, "frontend-playback-complete"
+    if (
+        tts_manager.has_audio_output
+        and message_handler.client_supports(client_uid, "playback-complete")
+    ):
+        # Derive the watchdog from the encoded media duration, with a fixed grace
+        # period for decode, scheduling, and transport overhead.
+        timeout = (
+            tts_manager.total_playback_duration_seconds
+            + PLAYBACK_ACK_GRACE_SECONDS
         )
-
+        # Register before sending: an empty renderer queue can ACK immediately.
+        ack_task = asyncio.create_task(
+            message_handler.wait_for_response(
+                client_uid, "frontend-playback-complete",
+                timeout=timeout,
+            )
+        )
+        await asyncio.sleep(0)
+        try:
+            await websocket_send(json.dumps({"type": "backend-synth-complete"}))
+            response = await ack_task
+        finally:
+            if not ack_task.done():
+                ack_task.cancel()
         if not response:
             logger.warning(f"No playback completion response from {client_uid}")
-            return
 
     await websocket_send(json.dumps({"type": "force-new-message"}))
 

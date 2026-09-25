@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://3d-llm.local/protocol/desktop-bridge.schema.json",
+  "title": "Implemented avatar hit state event",
+  "type": "object",
+  "required": ["type", "hit"],
+  "properties": {
+    "type": { "const": "avatar.hit_state" },
+    "hit": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}

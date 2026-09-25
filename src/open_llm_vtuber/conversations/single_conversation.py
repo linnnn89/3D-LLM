@@ -178,12 +178,7 @@ async def process_single_conversation(
             # full_response will contain partial response before error
         # --- End processing agent response ---
 
-        # [阶段 6: 并发 TTS 任务收敛] 等待全部后台合成完毕，发出合成完成通知
-        if tts_manager.task_list:
-            await asyncio.gather(*tts_manager.task_list)
-            await websocket_send(json.dumps({"type": "backend-synth-complete"}))
-
-        # [阶段 7: 轮次终态收尾]
+        # [阶段 6: 收敛 TTS、等待播放 ACK 并发送轮次终态]
         await finalize_conversation_turn(
             tts_manager=tts_manager,
             websocket_send=websocket_send,

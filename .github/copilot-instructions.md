@@ -20,7 +20,7 @@ Some key files and directories:
 
 ```
 doc/                 # A deprecated directory
-frontend/            # Compiled web frontend artifacts (from git submodule)
+frontend/            # Compiled 2D web frontend artifacts committed in this repository
 config_templates/
     conf.default.yaml    # Configuration template for English users
     conf.ZH.default.yaml # Configuration template for Chinese users
@@ -33,7 +33,7 @@ conf.yaml            # User's configuration file, generated from a template
 
 ### 1.1. Repository Structure
 
-- Frontend Repository: The frontend is a React application developed in a separate repository: `Open-LLM-VTuber-Web`. Its built artifacts are integrated into the `frontend/` directory of this backend repository via a git submodule.
+- Frontend Assets: `frontend/` contains the bundled 2D Live2D build output served at `/`. It is tracked directly in this repository. The 3D page is served separately from `vrm_frontend/` at `/vrm/`.
 
 - Documentation Repository: The official documentation site is hosted in the `open-llm-vtuber.github.io` repository. When asked to generate documentation, create Markdown files in the project root. The user will be responsible for migrating them to the documentation site.
 

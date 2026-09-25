@@ -185,7 +185,9 @@ class WebSocketHandler:
             json.dumps(
                 {
                     "type": "set-model-and-conf",
-                    "model_info": session_service_context.live2d_model.model_info,
+                    "model_info": getattr(
+                        session_service_context.live2d_model, "model_info", None
+                    ),
                     "conf_name": session_service_context.character_config.conf_name,
                     "conf_uid": session_service_context.character_config.conf_uid,
                     "client_uid": client_uid,
@@ -280,7 +282,10 @@ class WebSocketHandler:
         if handler:
             await handler(websocket, client_uid, data)
         else:
-            if msg_type != "frontend-playback-complete":
+            if msg_type not in (
+                "frontend-playback-complete",
+                "frontend-capabilities",
+            ):
                 logger.warning(f"Unknown message type: {msg_type}")
 
     async def _handle_group_operation(
@@ -309,7 +314,7 @@ class WebSocketHandler:
     #   2. 处理群组成员退出 handle_client_disconnect；
     #   3. 释放网络连接映射 client_connections 与音频接收缓冲区 received_data_buffers；
     #   4. 强制取消正在执行的对话异步任务 task.cancel()，避免后台虚假执行与孤儿协程；
-    #   5. 调用 context.close() 销毁专属 MCP 进程与 Agent 资源。
+    #   5. 调用 context.close() 释放 MCP 资源，并按所有权关闭会话创建的 Agent。
     # =========================================================================
     async def handle_disconnect(self, client_uid: str) -> None:
         """Handle client disconnection"""
@@ -331,18 +336,18 @@ class WebSocketHandler:
             send_group_update=self.send_group_update,
         )
 
-        # Clean up other client data
+        # Keep the session context before removing the connection-owned references.
+        context = self.client_contexts.pop(client_uid, None)
         self.client_connections.pop(client_uid, None)
-        self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
         if client_uid in self.current_conversation_tasks:
             task = self.current_conversation_tasks[client_uid]
             if task and not task.done():
                 task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             self.current_conversation_tasks.pop(client_uid, None)
 
-        # Call context close to clean up resources (e.g., MCPClient)
-        context = self.client_contexts.get(client_uid)
+        # Close connection-owned resources without closing shared engines.
         if context:
             await context.close()
 
@@ -352,7 +357,7 @@ class WebSocketHandler:
     async def _cleanup_failed_connection(self, client_uid: str) -> None:
         """Clean up failed connection data"""
         self.client_connections.pop(client_uid, None)
-        self.client_contexts.pop(client_uid, None)
+        context = self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
         self.chat_group_manager.client_group_map.pop(client_uid, None)
 
@@ -360,7 +365,11 @@ class WebSocketHandler:
             task = self.current_conversation_tasks[client_uid]
             if task and not task.done():
                 task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             self.current_conversation_tasks.pop(client_uid, None)
+
+        if context:
+            await context.close()
 
         message_handler.cleanup_client(client_uid)
 
@@ -645,7 +654,7 @@ class WebSocketHandler:
             json.dumps(
                 {
                     "type": "set-model-and-conf",
-                    "model_info": context.live2d_model.model_info,
+                    "model_info": getattr(context.live2d_model, "model_info", None),
                     "conf_name": context.character_config.conf_name,
                     "conf_uid": context.character_config.conf_uid,
                     "client_uid": client_uid,

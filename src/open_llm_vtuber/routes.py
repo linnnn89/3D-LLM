@@ -9,7 +9,6 @@ from starlette.websockets import WebSocketDisconnect
 from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
-from .proxy_handler import ProxyHandler
 
 
 # =============================================================================
@@ -60,36 +59,6 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
     return router
 
 
-# =============================================================================
-# [架构导航 / 核心节点] 多路复用代理路由 (Proxy Route)
-# -----------------------------------------------------------------------------
-# 角色职责: 当多个外部平台/桌宠端需要连接单实例时，提供单信道汇聚转发 (/proxy-ws)。
-# =============================================================================
-def init_proxy_route(server_url: str) -> APIRouter:
-    """
-    Create and return API routes for handling proxy connections.
-
-    Args:
-        server_url: The WebSocket URL of the actual server
-
-    Returns:
-        APIRouter: Configured router with proxy WebSocket endpoint
-    """
-    router = APIRouter()
-    proxy_handler = ProxyHandler(server_url)
-
-    @router.websocket("/proxy-ws")
-    async def proxy_endpoint(websocket: WebSocket):
-        """WebSocket endpoint for proxy connections"""
-        try:
-            await proxy_handler.handle_client_connection(websocket)
-        except Exception as e:
-            logger.error(f"Error in proxy connection: {e}")
-            raise
-
-    return router
-
-
 def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
     """
     Create and return API routes for handling web tool interactions.
@@ -132,13 +101,29 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
                     live2d_dir, folder_name, f"{folder_name}.model3.json"
                 ).replace("\\", "/")
 
+                if not os.path.isfile(model3_file):
+                    # VTube Studio exports can keep a localized folder name while
+                    # the Cubism descriptor uses the model's original file name.
+                    candidates = sorted(
+                        file_name
+                        for file_name in os.listdir(entry.path)
+                        if file_name.endswith(".model3.json")
+                        and os.path.isfile(os.path.join(entry.path, file_name))
+                    )
+                    if len(candidates) != 1:
+                        continue
+                    model3_file = os.path.join(entry.path, candidates[0]).replace(
+                        "\\", "/"
+                    )
+
                 if os.path.isfile(model3_file):
                     # Find avatar file if it exists
                     avatar_file = None
-                    for ext in supported_extensions:
-                        avatar_path = os.path.join(
-                            live2d_dir, folder_name, f"{folder_name}{ext}"
-                        )
+                    avatar_names = [
+                        f"{folder_name}{ext}" for ext in supported_extensions
+                    ] + ["Icon.png"]
+                    for avatar_name in avatar_names:
+                        avatar_path = os.path.join(entry.path, avatar_name)
                         if os.path.isfile(avatar_path):
                             avatar_file = avatar_path.replace("\\", "/")
                             break

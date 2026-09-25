@@ -1,0 +1,8 @@
+{
+  "identifier": "avatar-remote",
+  "description": "POC bridge for the local avatar page only",
+  "windows": ["avatar"],
+  "local": false,
+  "remote": { "urls": ["http://127.0.0.1:12393/*"] },
+  "permissions": ["allow-set-hit-state"]
+}

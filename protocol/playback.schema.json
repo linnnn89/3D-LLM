@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://3d-llm.local/protocol/playback.schema.json",
+  "title": "Conversation playback completion messages",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "features"],
+      "properties": {
+        "type": { "const": "frontend-capabilities" },
+        "features": {
+          "type": "array",
+          "items": { "enum": ["playback-complete"] },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "const": "backend-synth-complete" } },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "const": "frontend-playback-complete" } },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "const": "force-new-message" } },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "control" },
+        "text": { "const": "conversation-chain-end" }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

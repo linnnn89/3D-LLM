@@ -251,6 +251,15 @@ window.addEventListener(
 const HOVER_POLL_MS = 100
 let hoverTimer = null
 let hoverObserver = null
+let bridgeHit = null
+let bridgeHitAt = 0
+
+window.addEventListener('desktop-bridge', (event) => {
+  const detail = event.detail
+  if (!detail || detail.type !== 'avatar.hit_state' || typeof detail.hit !== 'boolean') return
+  bridgeHit = detail.hit
+  bridgeHitAt = performance.now()
+})
 
 /**
  * 读取当前命中状态并上报。
@@ -269,7 +278,10 @@ function reportHover() {
   }
 
   // 页面还没跑过 raycast 时 cursor 为空字符串，此时不算命中
-  ipcRenderer.send('avatar:hover-state', canvas.style.cursor === 'pointer')
+  // The explicit renderer signal is authoritative while fresh. Keep the DOM probe
+  // as a compatibility fallback for older renderer bundles during migration.
+  const hit = performance.now() - bridgeHitAt < 500 ? bridgeHit : canvas.style.cursor === 'pointer'
+  ipcRenderer.send('avatar:hover-state', hit)
 }
 
 function startHoverProbe() {
