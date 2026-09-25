@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import re
 import uuid
 from datetime import datetime
@@ -42,6 +43,16 @@ class TTSTaskManager:
         # Counter for maintaining order
         self._sequence_counter = 0
         self._next_sequence_to_send = 0
+        self.has_audio_output = False
+        self.total_playback_duration_seconds = 0.0
+        self._delivery_error: Exception | None = None
+
+    def record_audio_payload(self, payload: Dict) -> None:
+        """Track media duration locally without adding metadata to the wire protocol."""
+        self.has_audio_output = True
+        duration = payload.pop("_playback_duration_seconds", 0.0)
+        if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
+            self.total_playback_duration_seconds += duration
 
     # =========================================================================
     # [并发入口] 句子合成排队并申请序列号
@@ -127,18 +138,30 @@ class TTSTaskManager:
             try:
                 # Get payload from queue
                 payload, sequence_number = await self._payload_queue.get()
-                buffered_payloads[sequence_number] = payload
+                try:
+                    buffered_payloads[sequence_number] = payload
 
-                # [高危连续出队] 只要下一个序号已在缓存中，立即连续发送
-                while self._next_sequence_to_send in buffered_payloads:
-                    next_payload = buffered_payloads.pop(self._next_sequence_to_send)
-                    await websocket_send(json.dumps(next_payload))
-                    self._next_sequence_to_send += 1
-
-                self._payload_queue.task_done()
-
+                    # [高危连续出队] 只要下一个序号已在缓存中，立即连续发送
+                    while self._next_sequence_to_send in buffered_payloads:
+                        next_payload = buffered_payloads.pop(self._next_sequence_to_send)
+                        await websocket_send(json.dumps(next_payload))
+                        self._next_sequence_to_send += 1
+                finally:
+                    self._payload_queue.task_done()
             except asyncio.CancelledError:
-                break
+                raise
+            except Exception as error:
+                self._delivery_error = error
+                while not self._payload_queue.empty():
+                    self._payload_queue.get_nowait()
+                    self._payload_queue.task_done()
+                return
+
+    async def wait_for_delivery(self) -> None:
+        """Wait until all queued audio payloads have been sent to the client."""
+        await self._payload_queue.join()
+        if self._delivery_error:
+            raise RuntimeError("Failed to send queued audio payload") from self._delivery_error
 
     async def _send_silent_payload(
         self,
@@ -151,7 +174,9 @@ class TTSTaskManager:
             audio_path=None,
             display_text=display_text,
             actions=actions,
+            include_playback_duration=True,
         )
+        self.record_audio_payload(audio_payload)
         await self._payload_queue.put((audio_payload, sequence_number))
 
     async def _process_tts(
@@ -171,7 +196,9 @@ class TTSTaskManager:
                 audio_path=audio_file_path,
                 display_text=display_text,
                 actions=actions,
+                include_playback_duration=True,
             )
+            self.record_audio_payload(payload)
             # Queue the payload with its sequence number
             await self._payload_queue.put((payload, sequence_number))
 
@@ -182,7 +209,9 @@ class TTSTaskManager:
                 audio_path=None,
                 display_text=display_text,
                 actions=actions,
+                include_playback_duration=True,
             )
+            self.record_audio_payload(payload)
             await self._payload_queue.put((payload, sequence_number))
 
         finally:
@@ -205,5 +234,8 @@ class TTSTaskManager:
             self._sender_task.cancel()
         self._sequence_counter = 0
         self._next_sequence_to_send = 0
+        self.has_audio_output = False
+        self.total_playback_duration_seconds = 0.0
+        self._delivery_error = None
         # Create a new queue to clear any pending items
         self._payload_queue = asyncio.Queue()

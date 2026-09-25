@@ -27,7 +27,7 @@ from loguru import logger
 
 # 情绪标签的通用形态：``[joy]`` / ``[happy_2]`` 之类由提示词约定的短标记。
 # 只在模型没提供 emotionMap（例如 VRM 模式）或标签不在 map 中时用作兜底。
-_EMOTION_TAG_RE = re.compile(r"\[\s*[A-Za-z_][A-Za-z0-9_]{0,19}\s*\]")
+_EMOTION_TAG_RE = re.compile(r"\[\s*([A-Za-z_][A-Za-z0-9_]{0,19})\s*\]")
 
 
 # =============================================================================
@@ -107,12 +107,23 @@ def actions_extractor(live2d_model: Live2dModel):
                 if isinstance(item, SentenceWithTags):
                     sentence = item
                     actions = Actions()
-                    # Only extract emotions for non-tag text
+                    # Keep semantic labels for VRM and numeric IDs for the 2D client.
                     if not any(
                         tag.state in [TagState.START, TagState.END]
                         for tag in sentence.tags
                     ):
-                        expressions = live2d_model.extract_emotion(sentence.text)
+                        emotions = [
+                            match.group(1).lower()
+                            for match in _EMOTION_TAG_RE.finditer(sentence.text)
+                        ]
+                        if emotions:
+                            actions.emotions = emotions
+
+                        expressions = (
+                            live2d_model.extract_emotion(sentence.text)
+                            if live2d_model
+                            else []
+                        )
                         if expressions:
                             actions.expressions = expressions
                     yield sentence, actions  # Yield the tuple

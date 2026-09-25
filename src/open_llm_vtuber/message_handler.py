@@ -12,6 +12,7 @@ class MessageHandler:
         self._response_data: Dict[str, Dict[Tuple[str, Optional[str]], dict]] = (
             defaultdict(dict)
         )
+        self._client_capabilities: Dict[str, set[str]] = {}
 
     async def wait_for_response(
         self,
@@ -66,6 +67,16 @@ class MessageHandler:
         if not msg_type:
             return
 
+        if msg_type == "frontend-capabilities":
+            features = message.get("features", [])
+            if not isinstance(features, list):
+                features = []
+            self._client_capabilities[client_uid] = {
+                feature
+                for feature in features
+                if isinstance(feature, str)
+            }
+
         response_key = (msg_type, request_id)
 
         if (
@@ -74,6 +85,10 @@ class MessageHandler:
         ):
             self._response_data[client_uid][response_key] = message
             self._response_events[client_uid][response_key].set()
+
+    def client_supports(self, client_uid: str, feature: str) -> bool:
+        """Return whether a connected client declared support for a feature."""
+        return feature in self._client_capabilities.get(client_uid, set())
 
     def cleanup_client(self, client_uid: str) -> None:
         """
@@ -87,6 +102,7 @@ class MessageHandler:
                 event.set()
             self._response_events.pop(client_uid)
             self._response_data.pop(client_uid, None)
+        self._client_capabilities.pop(client_uid, None)
 
 
 message_handler = MessageHandler()

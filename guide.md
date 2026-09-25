@@ -110,7 +110,7 @@ The codebase uses the missing `_cleanup_failed_connection` method pattern - when
 - **Main server**: `src/open_llm_vtuber/server.py`
 - **WebSocket routing**: `src/open_llm_vtuber/routes.py`
 - **Configuration**: `conf.yaml` (user), `config_templates/` (defaults)
-- **Frontend**: `frontend/` (Git submodule)
+- **Frontend**: `frontend/` (bundled 2D Live2D build assets; no submodule setup)
 - **Live2D models**: `live2d-models/`
 - **Character definitions**: `characters/`
 - **Chat history**: `chat_history/`
@@ -151,4 +151,3 @@ Uses **uv** (modern Python package manager):
 - Dependencies defined in `pyproject.toml`
 - Lock file: `uv.lock`
 - Generated requirements: `requirements.txt` (auto-generated)
-- Optional dependencies for specific features (e.g., `bilibili` extra)

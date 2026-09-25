@@ -132,6 +132,16 @@ let gainNode = null;
 let currentAudioSource = null;
 let audioQueue = [];
 let isPlayingAudio = false;
+let pendingAudioDecodes = 0;
+let synthComplete = false;
+let audioGeneration = 0;
+
+function acknowledgePlaybackIfDrained() {
+  if (!synthComplete || pendingAudioDecodes || isPlayingAudio || audioQueue.length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  synthComplete = false;
+  ws.send(JSON.stringify({ type: 'frontend-playback-complete' }));
+}
 try {
   Object.defineProperty(window, 'isPlayingAudio', {
     get() { return isPlayingAudio; },
@@ -896,6 +906,7 @@ function base64ToArrayBuffer(base64) {
 
 async function handleAudioMessage(payload) {
   ensureAudioContext();
+  const generation = audioGeneration;
 
   const activeSpeaker = (bubbleSender && bubbleSender.textContent) || 'AI';
   const base64Audio = payload.audio;
@@ -907,12 +918,15 @@ async function handleAudioMessage(payload) {
   }
 
   try {
+    pendingAudioDecodes += 1;
     const arrayBuffer = base64ToArrayBuffer(base64Audio);
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    if (generation !== audioGeneration) return;
     audioQueue.push({
       audioBuffer: audioBuffer,
       displayText: payload.display_text,
-      expressions: payload.actions ? payload.actions.expressions : []
+      expressions: payload.actions ? payload.actions.expressions : [],
+      emotions: payload.actions ? payload.actions.emotions : []
     });
 
     if (!isPlayingAudio) {
@@ -920,6 +934,9 @@ async function handleAudioMessage(payload) {
     }
   } catch (err) {
     console.error('Error decoding audio:', err);
+  } finally {
+    pendingAudioDecodes -= 1;
+    acknowledgePlaybackIfDrained();
   }
 }
 
@@ -929,6 +946,7 @@ function playNextAudio() {
     updateStatus('connected', '在线');
     btnInterrupt.classList.remove('active');
     setEmotion('neutral', 0);
+    acknowledgePlaybackIfDrained();
     return;
   }
 
@@ -943,8 +961,8 @@ function playNextAudio() {
     showDialogue(item.displayText.name || activeSpeaker, item.displayText.text);
   }
 
-  if (item.expressions && item.expressions.length > 0) {
-    const exp = item.expressions[0];
+  if ((item.emotions && item.emotions.length > 0) || (item.expressions && item.expressions.length > 0)) {
+    const exp = item.emotions?.[0] || item.expressions[0];
     setEmotion(exp, 0.85);
 
     // 对话情绪与全身肢体动作联动
@@ -978,6 +996,8 @@ function playNextAudio() {
 }
 
 function stopAudioPlayback() {
+  audioGeneration += 1;
+  synthComplete = false;
   if (currentAudioSource) {
     try {
       currentAudioSource.stop();
@@ -1796,7 +1816,11 @@ function initClickInteraction() {
     clickMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     clickRaycaster.setFromCamera(clickMouse, camera);
     const hits = clickRaycaster.intersectObject(hitMesh, true);
-    renderer.domElement.style.cursor = hits.length > 0 ? 'pointer' : 'default';
+    const hit = hits.length > 0;
+    renderer.domElement.style.cursor = hit ? 'pointer' : 'default';
+    window.dispatchEvent(new CustomEvent('desktop-bridge', {
+      detail: { type: 'avatar.hit_state', hit }
+    }));
   });
 }
 
@@ -1813,6 +1837,10 @@ function initWebSocket() {
     ws.onopen = () => {
       console.log('✅ Connected to Open-LLM-VTuber WebSocket');
       updateStatus('connected', '在线就绪');
+      ws.send(JSON.stringify({
+        type: 'frontend-capabilities',
+        features: ['playback-complete']
+      }));
 
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       heartbeatInterval = setInterval(() => {
@@ -1840,6 +1868,7 @@ function initWebSocket() {
     };
 
     ws.onclose = () => {
+      stopAudioPlayback();
       console.warn('WebSocket closed. Reconnecting in 3s...');
       updateStatus('disconnected', '连接断开 (重连中)');
       if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -1870,6 +1899,15 @@ function handleServerMessage(data) {
       // 音频到达即视为本轮仍在进行，刷新空闲计时
       touchStatusActivity();
       handleAudioMessage(data);
+      break;
+
+    case 'backend-synth-complete':
+      synthComplete = true;
+      acknowledgePlaybackIfDrained();
+      break;
+
+    case 'force-new-message':
+      synthComplete = false;
       break;
 
     case 'user-input-transcription':
@@ -1923,6 +1961,8 @@ function handleServerMessage(data) {
     case 'control':
       if (data.text === 'interrupt') {
         stopAudioPlayback();
+      } else if (data.text === 'conversation-chain-end') {
+        updateStatus('connected', '在线就绪');
       }
       break;
 

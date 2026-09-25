@@ -30,6 +30,7 @@ def prepare_audio_payload(
     display_text: DisplayText = None,
     actions: Actions = None,
     forwarded: bool = False,
+    include_playback_duration: bool = False,
 ) -> dict[str, any]:
     """
     Prepares the audio payload for sending to a broadcast endpoint.
@@ -49,7 +50,7 @@ def prepare_audio_payload(
 
     if not audio_path:
         # Return payload for silent display
-        return {
+        payload = {
             "type": "audio",
             "audio": None,
             "volumes": [],
@@ -58,6 +59,9 @@ def prepare_audio_payload(
             "actions": actions.to_dict() if actions else None,
             "forwarded": forwarded,
         }
+        if include_playback_duration:
+            payload["_playback_duration_seconds"] = 0.0
+        return payload
 
     try:
         audio = AudioSegment.from_file(audio_path)
@@ -78,6 +82,8 @@ def prepare_audio_payload(
         "actions": actions.to_dict() if actions else None,
         "forwarded": forwarded,
     }
+    if include_playback_duration:
+        payload["_playback_duration_seconds"] = len(audio) / 1000.0
 
     return payload
 

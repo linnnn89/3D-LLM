@@ -54,7 +54,7 @@ from .config_manager import (
 #      同时独立维护当前连接专享的 send_text, client_uid, history_uid 及 MCP Client。
 # 高危注意:
 #   - 动态热重载必须走 load_from_config 比对配置 diff，避免重复初始化大模型导致显存泄漏。
-#   - 会话断开时必须调用 close() 释放 MCPClient 及后台子进程。
+#   - 会话断开时调用 close() 释放本会话 MCPClient；仅关闭本上下文自己创建的 Agent。
 # =============================================================================
 class ServiceContext:
     """Initializes, stores, and updates the asr, tts, and llm instances and other
@@ -69,6 +69,7 @@ class ServiceContext:
         self.asr_engine: ASRInterface = None
         self.tts_engine: TTSInterface = None
         self.agent_engine: AgentInterface = None
+        self._owns_agent_engine = False
         # translate_engine can be none if translation is disabled
         self.vad_engine: VADInterface | None = None
         self.translate_engine: TranslateInterface | None = None
@@ -211,7 +212,7 @@ class ServiceContext:
     # =========================================================================
     # [生命周期与清理] 会话销毁资源回收
     # 上游调用: websocket_handler.py -> handle_disconnect(client_uid)
-    # 核心职责: 关闭本会话的 MCPClient 连接与 Agent 内部异步资源，防止子进程与网络僵死
+    # 核心职责: 关闭本会话 MCPClient；共享原型 Agent 不能随单个客户端断开而关闭。
     # =========================================================================
     async def close(self):
         """Close resources associated with this service context."""
@@ -220,8 +221,14 @@ class ServiceContext:
             logger.info(f"Closing MCPClient for context instance {id(self)}...")
             await self.mcp_client.aclose()
             self.mcp_client = None
-        if self.agent_engine and hasattr(self.agent_engine, "close"):
+        if (
+            getattr(self, "_owns_agent_engine", False)
+            and self.agent_engine
+            and hasattr(self.agent_engine, "close")
+        ):
             await self.agent_engine.close()  # Ensure agent resources are also closed
+            self.agent_engine = None
+            self._owns_agent_engine = False
         logger.info("ServiceContext closed.")
 
     # =========================================================================
@@ -265,6 +272,7 @@ class ServiceContext:
         self.tts_engine = tts_engine
         self.vad_engine = vad_engine
         self.agent_engine = agent_engine
+        self._owns_agent_engine = False
         self.translate_engine = translate_engine
         # Load potentially shared components by reference
         self.mcp_server_registery = mcp_server_registery
@@ -356,12 +364,14 @@ class ServiceContext:
 
     def init_live2d(self, live2d_model_name: str) -> None:
         logger.info(f"Initializing Live2D: {live2d_model_name}")
+        self.live2d_model = None
         try:
             self.live2d_model = Live2dModel(live2d_model_name)
             self.character_config.live2d_model_name = live2d_model_name
         except Exception as e:
-            logger.critical(f"Error initializing Live2D: {e}")
-            logger.critical("Try to proceed without Live2D...")
+            logger.warning(
+                f"Live2D metadata is unavailable ({e}); continuing without 2D expressions."
+            )
 
     def init_asr(self, asr_config: ASRConfig) -> None:
         if not self.asr_engine or (self.character_config.asr_config != asr_config):
@@ -429,7 +439,7 @@ class ServiceContext:
         avatar = self.character_config.avatar or ""  # Get avatar from config
 
         try:
-            self.agent_engine = AgentFactory.create_agent(
+            agent_engine = AgentFactory.create_agent(
                 conversation_agent_choice=agent_config.conversation_agent_choice,
                 agent_settings=agent_config.agent_settings.model_dump(),
                 llm_configs=agent_config.llm_configs.model_dump(),
@@ -442,6 +452,17 @@ class ServiceContext:
                 tool_executor=self.tool_executor,
                 mcp_prompt_string=self.mcp_prompt,
             )
+
+            previous_agent = self.agent_engine
+            previous_is_owned = getattr(self, "_owns_agent_engine", False)
+            self.agent_engine = agent_engine
+            self._owns_agent_engine = True
+            if (
+                previous_is_owned
+                and previous_agent is not agent_engine
+                and hasattr(previous_agent, "close")
+            ):
+                await previous_agent.close()
 
             logger.debug(f"Agent choice: {agent_config.conversation_agent_choice}")
             logger.debug(f"System prompt: {system_prompt}")
@@ -546,8 +567,13 @@ class ServiceContext:
             prompt_content = prompt_loader.load_util(prompt_file)
 
             if prompt_name == "live2d_expression_prompt":
+                emotion_keys = (
+                    self.live2d_model.emo_str
+                    if self.live2d_model
+                    else "[neutral], [anger], [disgust], [fear], [joy], [sadness], [surprise], [smirk]"
+                )
                 prompt_content = prompt_content.replace(
-                    "[<insert_emomap_keys>]", self.live2d_model.emo_str
+                    "[<insert_emomap_keys>]", emotion_keys
                 )
 
             if prompt_name == "mcp_prompt":
@@ -681,7 +707,7 @@ class ServiceContext:
                     json.dumps(
                         {
                             "type": "set-model-and-conf",
-                            "model_info": self.live2d_model.model_info,
+                            "model_info": getattr(self.live2d_model, "model_info", None),
                             "conf_name": self.character_config.conf_name,
                             "conf_uid": self.character_config.conf_uid,
                             "character_id": self.character_config.conf_uid,

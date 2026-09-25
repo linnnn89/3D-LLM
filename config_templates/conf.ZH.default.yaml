@@ -492,11 +492,3 @@ character_config:
         region: 'ap-guangzhou'
         source_lang: 'zh'
         target_lang: 'ja'
-
-# 直播平台集成
-live_config:
-  bilibili_live:
-    # 要监控的B站直播间ID列表（直播间URL中的数字）
-    room_ids: [1991478060]
-    # SESSDATA cookie值（可选，用于认证请求，可以查看发送弹幕用户名）
-    sessdata: ""
