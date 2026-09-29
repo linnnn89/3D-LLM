@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod tray;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -10,23 +12,30 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 struct HitState {
     ignoring: AtomicBool,
+    enabled: AtomicBool,
 }
 
 #[tauri::command]
-fn set_hit_state(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<HitState>>, hit: bool) {
-    let ignore = !hit;
-    if state.ignoring.swap(ignore, Ordering::SeqCst) != ignore {
-        if let Err(error) = window.set_ignore_cursor_events(ignore) {
-            eprintln!("cursor ignore failed: {error}");
-        }
+fn set_hit_state(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<HitState>>,
+    hit: bool,
+) -> Result<(), String> {
+    let ignore = state.enabled.load(Ordering::SeqCst) && !hit;
+    if state.ignoring.load(Ordering::SeqCst) != ignore {
+        window
+            .set_ignore_cursor_events(ignore)
+            .map_err(|error| error.to_string())?;
+        state.ignoring.store(ignore, Ordering::SeqCst);
     }
+    Ok(())
 }
 
 fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_millis(33));
-            if !state.ignoring.load(Ordering::SeqCst) {
+            if !state.ignoring.load(Ordering::SeqCst) || !window.is_visible().unwrap_or(false) {
                 continue;
             }
             let (Ok(position), Ok(size), Ok(scale)) = (
@@ -63,6 +72,7 @@ fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
 fn main() {
     let state = Arc::new(HitState {
         ignoring: AtomicBool::new(false),
+        enabled: AtomicBool::new(true),
     });
     tauri::Builder::default()
         .manage(state.clone())
@@ -74,6 +84,8 @@ fn main() {
                 .inner_size(520.0, 760.0)
                 .transparent(true)
                 .decorations(false)
+                // Windows adds a visible border to undecorated windows with shadows.
+                .shadow(false)
                 .always_on_top(true)
                 .on_page_load(|window, payload| {
                     if payload.event() != tauri::webview::PageLoadEvent::Finished {
@@ -98,7 +110,8 @@ fn main() {
                       window.addEventListener('desktop-bridge', (event) => {
                         const value = event.detail;
                         if (value?.type === 'avatar.hit_state' && typeof value.hit === 'boolean') {
-                          window.__TAURI__.core.invoke('set_hit_state', { hit: value.hit });
+                          window.__TAURI__.core.invoke('set_hit_state', { hit: value.hit })
+                            .catch(error => console.error('Hit-state bridge failed:', error));
                         }
                       });
                       window.addEventListener('__pet-pointer', (event) => {
@@ -113,6 +126,7 @@ fn main() {
                     }
                 })
                 .build()?;
+            tray::install(app, &window, state.clone())?;
             watch_cursor(window, state.clone());
             Ok(())
         })
