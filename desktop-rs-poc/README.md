@@ -12,6 +12,13 @@ even when the cursor stops, so the renderer's throttling cannot discard the fina
 position permanently. The host embeds `desktop/pet-overlay.css` at build time and
 applies it after each page load to clear the page background and hide the web UI.
 
+The notification-area icon opens a native menu on left or right click. It provides
+show/hide, three size presets, click-through and always-on-top switches, centering,
+page reload, global/character settings, and exit. Settings reuse the existing
+backend pages in separate normal windows; saving requires the real Python API.
+Window preferences are session-only in this POC. Electron's chat window, framing
+presets, freeform resize overlay, and global shortcuts have not been migrated yet.
+
 If PowerShell cannot find Cargo, add the per-user Rust tools to this shell first:
 `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`.
 The Tauri capability grants the local `127.0.0.1:12393` origin only the
