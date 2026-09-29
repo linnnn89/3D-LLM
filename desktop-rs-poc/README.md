@@ -7,7 +7,10 @@ The POC does not start or alter Python and does not replace `desktop/`.
 From `desktop-rs-poc/src-tauri`, run `cargo run`. The single transparent,
 always-on-top window receives explicit `avatar.hit_state` events from the renderer.
 When it ignores cursor events, a Windows cursor watcher probes the renderer with
-synthetic pointer moves so raycasting can turn interaction back on.
+synthetic pointer moves so raycasting can turn interaction back on. Probes repeat
+even when the cursor stops, so the renderer's throttling cannot discard the final
+position permanently. The host embeds `desktop/pet-overlay.css` at build time and
+applies it after each page load to clear the page background and hide the web UI.
 
 If PowerShell cannot find Cargo, add the per-user Rust tools to this shell first:
 `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`.

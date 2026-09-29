@@ -24,11 +24,9 @@ fn set_hit_state(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<HitSt
 
 fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
     thread::spawn(move || {
-        let mut last = None;
         loop {
             thread::sleep(Duration::from_millis(33));
             if !state.ignoring.load(Ordering::SeqCst) {
-                last = None;
                 continue;
             }
             let (Ok(position), Ok(size), Ok(scale)) = (
@@ -45,13 +43,10 @@ fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
             let x = cursor.x - position.x;
             let y = cursor.y - position.y;
             if x < 0 || y < 0 || x >= size.width as i32 || y >= size.height as i32 {
-                last = None;
                 continue;
             }
-            if last == Some((x, y)) {
-                continue;
-            }
-            last = Some((x, y));
+            // Repeat stationary coordinates: the renderer throttles pointer events,
+            // so the last movement may have been dropped before reaching raycasting.
             let script = format!(
                 "window.dispatchEvent(new CustomEvent('__pet-pointer', {{detail: {{x: {}, y: {}}}}}));",
                 x as f64 / scale,
@@ -83,6 +78,21 @@ fn main() {
                 .on_page_load(|window, payload| {
                     if payload.event() != tauri::webview::PageLoadEvent::Finished {
                         return;
+                    }
+                    let overlay = format!(
+                        r#"(() => {{
+                          let style = document.getElementById('__pet-overlay');
+                          if (!style) {{
+                            style = document.createElement('style');
+                            style.id = '__pet-overlay';
+                            document.head.appendChild(style);
+                          }}
+                          style.textContent = {:?};
+                        }})();"#,
+                        include_str!("../../../desktop/pet-overlay.css")
+                    );
+                    if let Err(error) = window.eval(overlay) {
+                        eprintln!("pet overlay injection failed: {error}");
                     }
                     let bridge = r#"
                       window.addEventListener('desktop-bridge', (event) => {
