@@ -74,6 +74,8 @@ fn main() {
                 .inner_size(520.0, 760.0)
                 .transparent(true)
                 .decorations(false)
+                // Windows adds a visible border to undecorated windows with shadows.
+                .shadow(false)
                 .always_on_top(true)
                 .on_page_load(|window, payload| {
                     if payload.event() != tauri::webview::PageLoadEvent::Finished {
