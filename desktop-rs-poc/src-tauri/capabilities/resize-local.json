@@ -1,0 +1,7 @@
+{
+  "identifier": "resize-local",
+  "description": "Only the bundled resize editor can apply avatar bounds",
+  "windows": ["resize-frame"],
+  "local": true,
+  "permissions": ["allow-finish-resize"]
+}

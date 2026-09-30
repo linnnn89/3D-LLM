@@ -1,18 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod tray;
+mod resize;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 struct HitState {
     ignoring: AtomicBool,
     enabled: AtomicBool,
+    dragging: AtomicBool,
+    resizing: AtomicBool,
+    menu_open: AtomicBool,
 }
 
 #[tauri::command]
@@ -21,6 +26,12 @@ fn set_hit_state(
     state: tauri::State<'_, Arc<HitState>>,
     hit: bool,
 ) -> Result<(), String> {
+    if state.dragging.load(Ordering::SeqCst)
+        || state.resizing.load(Ordering::SeqCst)
+        || state.menu_open.load(Ordering::SeqCst)
+    {
+        return Ok(());
+    }
     let ignore = state.enabled.load(Ordering::SeqCst) && !hit;
     if state.ignoring.load(Ordering::SeqCst) != ignore {
         window
@@ -31,10 +42,66 @@ fn set_hit_state(
     Ok(())
 }
 
+#[tauri::command]
+async fn start_avatar_drag(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<HitState>>,
+) -> Result<(), String> {
+    if window.label() != "avatar" || state.resizing.load(Ordering::SeqCst) {
+        return Err("Avatar is not available for dragging".into());
+    }
+    // A delayed WebView IPC must not start a move loop after the button was released.
+    if unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } >= 0 {
+        return Ok(());
+    }
+    window.set_ignore_cursor_events(false).map_err(|error| error.to_string())?;
+    state.ignoring.store(false, Ordering::SeqCst);
+    state.dragging.store(true, Ordering::SeqCst);
+    if let Err(error) = window.start_dragging() {
+        state.dragging.store(false, Ordering::SeqCst);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_pet_menu(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<HitState>>,
+) -> Result<(), String> {
+    if window.label() != "avatar" {
+        return Err("Only the avatar can open the pet menu".into());
+    }
+    let menu = window.app_handle().state::<tray::PetMenu>();
+    if state.menu_open.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    // The popup belongs to the avatar HWND. Keep that owner interactive until
+    // Windows' modal menu loop returns, even when the cursor leaves the model.
+    let result = (|| {
+        window.set_ignore_cursor_events(false)?;
+        state.ignoring.store(false, Ordering::SeqCst);
+        window.popup_menu(&menu.0)
+    })();
+    state.menu_open.store(false, Ordering::SeqCst);
+    result.map_err(|error| error.to_string())
+}
+
 fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_millis(33));
+            if state.dragging.load(Ordering::SeqCst) {
+                if unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } < 0 {
+                    continue;
+                }
+                state.dragging.store(false, Ordering::SeqCst);
+                // Native move loops may consume pointerup, so release the renderer's press too.
+                let _ = window.eval("window.dispatchEvent(new Event('blur'));");
+            }
+            if state.resizing.load(Ordering::SeqCst) || state.menu_open.load(Ordering::SeqCst) {
+                continue;
+            }
             if !state.ignoring.load(Ordering::SeqCst) || !window.is_visible().unwrap_or(false) {
                 continue;
             }
@@ -73,10 +140,15 @@ fn main() {
     let state = Arc::new(HitState {
         ignoring: AtomicBool::new(false),
         enabled: AtomicBool::new(true),
+        dragging: AtomicBool::new(false),
+        resizing: AtomicBool::new(false),
+        menu_open: AtomicBool::new(false),
     });
     tauri::Builder::default()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![set_hit_state])
+        .invoke_handler(tauri::generate_handler![
+            set_hit_state, start_avatar_drag, open_pet_menu, resize::finish_resize, tray::sync_character_menu
+        ])
         .setup(move |app| {
             let url = "http://127.0.0.1:12393/vrm/".parse()?;
             let window = WebviewWindowBuilder::new(app, "avatar", WebviewUrl::External(url))
@@ -106,21 +178,7 @@ fn main() {
                     if let Err(error) = window.eval(overlay) {
                         eprintln!("pet overlay injection failed: {error}");
                     }
-                    let bridge = r#"
-                      window.addEventListener('desktop-bridge', (event) => {
-                        const value = event.detail;
-                        if (value?.type === 'avatar.hit_state' && typeof value.hit === 'boolean') {
-                          window.__TAURI__.core.invoke('set_hit_state', { hit: value.hit })
-                            .catch(error => console.error('Hit-state bridge failed:', error));
-                        }
-                      });
-                      window.addEventListener('__pet-pointer', (event) => {
-                        const canvas = document.querySelector('#canvas-container canvas');
-                        if (canvas) canvas.dispatchEvent(new PointerEvent('pointermove', {
-                          clientX: event.detail.x, clientY: event.detail.y, bubbles: true
-                        }));
-                      });
-                    "#;
+                    let bridge = include_str!("../../avatar-bridge.js");
                     if let Err(error) = window.eval(bridge) {
                         eprintln!("bridge injection failed: {error}");
                     }

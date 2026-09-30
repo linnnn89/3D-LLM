@@ -3,10 +3,11 @@
   "productName": "3D LLM Rust POC",
   "version": "0.1.0",
   "identifier": "dev.3dllm.rustpoc",
+  "build": { "frontendDist": "../ui" },
   "app": {
     "windows": [],
     "withGlobalTauri": true,
-    "security": { "capabilities": ["avatar-remote"] }
+    "security": { "capabilities": ["avatar-remote", "resize-local"] }
   },
   "bundle": { "active": false, "icon": [] }
 }

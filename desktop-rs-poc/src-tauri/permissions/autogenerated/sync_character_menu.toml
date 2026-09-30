@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-character-menu"
+description = "Enables the sync_character_menu command without any pre-configured scope."
+commands.allow = ["sync_character_menu"]
+
+[[permission]]
+identifier = "deny-sync-character-menu"
+description = "Denies the sync_character_menu command without any pre-configured scope."
+commands.deny = ["sync_character_menu"]

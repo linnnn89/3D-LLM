@@ -190,6 +190,7 @@ const MOTION_URLS = {
 
 // WebSocket
 let ws = null;
+let confirmedCharacterId = null;
 let heartbeatInterval = null;
 let isRecording = false;
 let mediaStream = null;
@@ -433,6 +434,25 @@ window.CharacterAdapter = CharacterAdapter;
 window.VrmCharacterAdapter = VrmCharacterAdapter;
 window.PmxCharacterAdapter = PmxCharacterAdapter;
 
+function createCharacterMotionClip(name, animation, vrm) {
+  const clip = createVRMAnimationClip(animation, vrm);
+  if (name !== 'idle') return clip;
+  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+  const rest = vrm.humanoid.normalizedRestPose.hips?.position;
+  if (!hips || !rest) return clip;
+  const track = clip.tracks.find(track => track.name === `${hips.name}.position`);
+  if (!track || track.values.length < 3) return clip;
+  // The supplied idle asset starts about 15.7 source units left of its rest
+  // origin. Keep its relative sway and vertical breathing, not that placement.
+  const offsetX = rest[0] - track.values[0];
+  const offsetZ = rest[2] - track.values[2];
+  for (let index = 0; index < track.values.length; index += 3) {
+    track.values[index] += offsetX;
+    track.values[index + 2] += offsetZ;
+  }
+  return clip;
+}
+
 /**
  * 为 VRM 角色构建 AnimationMixer 并挂载 Clips (契约解耦：让 adapters.js 免受 @pixiv/three-vrm-animation 依赖捆绑)
  */
@@ -452,7 +472,7 @@ function setupVrmMotionMixer(adapter) {
 
   for (const [name, vrmAnim] of Object.entries(loadedVrmAnimations)) {
     try {
-      const clip = createVRMAnimationClip(vrmAnim, adapter.vrm);
+      const clip = createCharacterMotionClip(name, vrmAnim, adapter.vrm);
       activeMotionClips[name] = clip;
       clips[name] = clip;
     } catch (e) {
@@ -1254,7 +1274,7 @@ async function loadVrmaFile(name, url) {
 
   if (currentVrm) {
     try {
-      activeMotionClips[name] = createVRMAnimationClip(vrmAnim, currentVrm);
+      activeMotionClips[name] = createCharacterMotionClip(name, vrmAnim, currentVrm);
     } catch (e) {
       console.warn(`[Motion] 为当前角色生成 Clip 失败 (${name}):`, e);
     }
@@ -1309,7 +1329,7 @@ function setupMotionMixer(vrm) {
   // 绑定所有已载入的 VRMA 动作
   for (const [name, vrmAnim] of Object.entries(loadedVrmAnimations)) {
     try {
-      activeMotionClips[name] = createVRMAnimationClip(vrmAnim, vrm);
+      activeMotionClips[name] = createCharacterMotionClip(name, vrmAnim, vrm);
     } catch (e) {
       console.warn(`[Motion] 为新角色生成动作 clip 失败 (${name}):`, e);
     }
@@ -1787,15 +1807,18 @@ function handleModelClick(event) {
  * 初始化 3D 角色身体点击与光标交互系统
  */
 function initClickInteraction() {
-  let pointerDownPos = { x: 0, y: 0, time: 0 };
+  let pointerDownPos = null;
 
   renderer.domElement.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.altKey) { pointerDownPos = null; return; }
     pointerDownPos = { x: e.clientX, y: e.clientY, time: Date.now() };
   });
 
   renderer.domElement.addEventListener('pointerup', (e) => {
+    if (e.button !== 0 || e.altKey || !pointerDownPos) return;
     const dist = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
     const dur = Date.now() - pointerDownPos.time;
+    pointerDownPos = null;
     // 判定为纯粹点击 (位移 < 8px 且耗时 < 500ms)，避免 OrbitControls 旋转缩放误触
     if (dist < 8 && dur < 500) {
       handleModelClick(e);
@@ -1825,6 +1848,29 @@ function initClickInteraction() {
 }
 
 // --- 5. WebSocket Integration ---
+function desktopCharacterSnapshot() {
+  const options = Array.from(configSelect?.options || [], option => [option.value, option.textContent.trim()]);
+  const active = options.find(([file]) => confirmedCharacterId && resolveCharacterId(file) === confirmedCharacterId)?.[0] || '';
+  return { options, active, connected: ws?.readyState === WebSocket.OPEN };
+}
+
+function publishDesktopCharacters() {
+  window.dispatchEvent(new CustomEvent('desktop-bridge', {
+    detail: { type: 'avatar.characters', ...desktopCharacterSnapshot() }
+  }));
+}
+
+window.__petCharacters = {
+  snapshot: desktopCharacterSnapshot,
+  switchTo(file) {
+    const state = desktopCharacterSnapshot();
+    if (!state.connected || state.active === file || !state.options.some(option => option[0] === file)) return;
+    // Use the existing avatar WebSocket and wait for set-model-and-conf before
+    // updating the model or the native menu's current-character mark.
+    ws.send(JSON.stringify({ type: 'switch-config', file }));
+  }
+};
+
 function initWebSocket() {
   const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${wsProtocol}//${location.host}/client-ws`;
@@ -1835,6 +1881,7 @@ function initWebSocket() {
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
+      publishDesktopCharacters();
       console.log('✅ Connected to Open-LLM-VTuber WebSocket');
       updateStatus('connected', '在线就绪');
       ws.send(JSON.stringify({
@@ -1868,6 +1915,7 @@ function initWebSocket() {
     };
 
     ws.onclose = () => {
+      publishDesktopCharacters();
       stopAudioPlayback();
       console.warn('WebSocket closed. Reconnecting in 3s...');
       updateStatus('disconnected', '连接断开 (重连中)');
@@ -1930,7 +1978,7 @@ function handleServerMessage(data) {
         });
 
         // 同步服务端配置列表，优先以角色身份证 ID 进行精准匹配
-        const activeCharId = currentAdapter?.characterId;
+        const activeCharId = confirmedCharacterId || currentAdapter?.characterId;
         for (let opt of configSelect.options) {
           const optId = opt.getAttribute('data-id') || resolveCharacterId(opt.value);
           if (activeCharId && optId === activeCharId) {
@@ -1939,12 +1987,14 @@ function handleServerMessage(data) {
           }
         }
       }
+      publishDesktopCharacters();
       break;
 
     case 'set-model-and-conf':
       console.log('Current character config:', data.conf_uid || data.conf_name);
       const activeCharId = data.conf_uid || data.character_id || resolveCharacterId(data.conf_name);
       if (activeCharId) {
+        confirmedCharacterId = activeCharId;
         applyCharacterUI(activeCharId);
         if (configSelect) {
           for (let opt of configSelect.options) {
@@ -1956,6 +2006,7 @@ function handleServerMessage(data) {
           }
         }
       }
+      publishDesktopCharacters();
       break;
 
     case 'control':
@@ -2041,9 +2092,17 @@ function showDialogue(sender, text) {
 }
 
 function resetCamera() {
+  // Flush OrbitControls' pending pan/rotation damping before restoring the view.
+  // Otherwise the next animation frame immediately moves the restored camera again.
+  const damping = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
   controls.target.set(0, 1.30, 0);
   camera.position.set(0, 1.36, 1.25);
+  camera.zoom = 1;
+  camera.updateProjectionMatrix();
   controls.update();
+  controls.enableDamping = damping;
 }
 
 // --- 7. Microphone Input ---
