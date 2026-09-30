@@ -43,7 +43,7 @@ pub fn begin(window: &WebviewWindow, state: &Arc<HitState>) -> tauri::Result<()>
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 if let Err(error) = editor.eval(&init)
                     .and_then(|_| editor.show()).and_then(|_| editor.set_focus()) {
-                    eprintln!("resize editor initialization failed: {error}");
+                    crate::host::log(editor.app_handle(), &format!("resize editor initialization failed: {error}"));
                     let _ = editor.close();
                 }
             }

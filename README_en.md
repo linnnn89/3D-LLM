@@ -7,6 +7,8 @@
 
 </div>
 
+> For the current Rust/Tauri pet, run `app/桌宠-Rust.exe`; see the [Rust host guide](desktop-rs-poc/README.md) for startup, shortcuts, logging and migration limits. The root desktop shortcut still starts Electron. Electron sections and historical design documents do not certify Rust behavior.
+
 ---
 
 A native Windows **3D AI companion and desktop pet system**. Forked and heavily re-engineered from Open-LLM-VTuber, this project shifts its core focus entirely to **real-time 3D rendering interactions** and a **native frameless transparent Windows desktop pet experience**.
@@ -42,10 +44,10 @@ The system natively supports dual-track rendering for both VRM and PMX (MMD) mod
 - **PMX Dedicated Stance & Physics**:
   - Eliminates the stiff default 40°–45° A-Pose in MMD models by applying an ergonomic relaxed standing stance (75°–80° lowered arms with slight elbow bends) and locking it directly into `animationPose`.
   - Integrates lower-body and toe CCDIK solvers to prevent feet sliding and leg stiffness during VMD playback.
-- **Hit-Test Feedback**: Mouse clicks on different parts of the character (differentiated by head and torso height thresholds) trigger corresponding emotional animations and voice responses.
+- **Hit-Test Feedback**: Mouse clicks on different parts of the character (differentiated by head and torso height thresholds) trigger corresponding animations; touch-triggered voice is disabled by the current product policy.
 
 ### 3. Windows 3D Desktop Pet Shell (`desktop/`)
-- **Frameless, Transparent, and Always-on-Top**: Built with Electron. Fully transparent background, zero border, pinned on top, and does not steal focus (`focusable: false`), keeping the Alt+Tab switcher clean.
+- **Frameless, Transparent, and Always-on-Top**: Built with Electron. Fully transparent background, zero border, pinned on top, and currently remains focusable and visible in Alt+Tab.
 - **Partial Mouse Click-Through**: Only the visible geometry of the 3D character accepts clicks and dragging. Transparent background areas pass all mouse events directly to underlying applications without disrupting your workflow.
 - **Standalone Floating Chat Window**: Frosted-glass minimal chat bubble (320×140, collapsible to 320×58). Communicates via Electron IPC to relay messages through the avatar viewport's single WebSocket connection. **Never opens a secondary WebSocket**, preventing session forks and TTS stream conflicts.
 - **System Tray & Global Hotkeys**:
@@ -61,7 +63,7 @@ The system natively supports dual-track rendering for both VRM and PMX (MMD) mod
 - **Zero-Build Hot Reload for Frontend**: The server directly serves the `vrm_frontend/` directory. Edits to HTML, JavaScript, CSS, or `.vrma` files take effect immediately by pressing `F5` in the window.
 
 ### 5. Credential Security & Data Isolation
-- **Stateless Repository Design**: The code repository is strictly stateless. All user configs, chat logs, and encrypted secrets are stored under the native Windows user directory (`%USERPROFILE%\Documents\LLM-3D-CHAT`). Pulling commits or switching branches will never wipe your personal data.
+- **Data locations**: Memory, user settings and encrypted credentials default to Documents/LLM-3D-CHAT (configurable). Conversation history remains in repository `chat_history/`, logs in `logs/`, and the storage pointer in `data/storage_config.json`. Rust host state/logs use `%LOCALAPPDATA%/3D-LLM-Rust`; Electron state uses its AppData directory. Preserve these locations when moving or updating the repository.
 - **Hardware-Level Windows DPAPI Vault**: API keys are encrypted via Windows `CryptProtectData`. The ciphertext is bound to your Windows user account. Config files store only a `KEY_VAULT` reference rather than plaintext secrets.
 - **Sparse Overrides**: The system saves only non-default changes to `user_settings.json`. Base settings upgrade cleanly with upstream changes, and any setting can be reverted individually to default.
 

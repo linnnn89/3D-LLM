@@ -2,6 +2,8 @@
 
 mod tray;
 mod resize;
+mod host;
+mod chat;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,6 +20,7 @@ struct HitState {
     dragging: AtomicBool,
     resizing: AtomicBool,
     menu_open: AtomicBool,
+    stopped: AtomicBool,
 }
 
 #[tauri::command]
@@ -90,7 +93,9 @@ async fn open_pet_menu(
 fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
     thread::spawn(move || {
         loop {
-            thread::sleep(Duration::from_millis(33));
+            if state.stopped.load(Ordering::SeqCst) { break; }
+            let active = window.is_visible().unwrap_or(false);
+            thread::sleep(Duration::from_millis(if active { 33 } else { 250 }));
             if state.dragging.load(Ordering::SeqCst) {
                 if unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } < 0 {
                     continue;
@@ -129,7 +134,7 @@ fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
                 y as f64 / scale
             );
             if let Err(error) = window.eval(script) {
-                eprintln!("pointer probe failed: {error}");
+                crate::host::log(window.app_handle(), &format!("pointer probe failed: {error}"));
                 break;
             }
         }
@@ -137,22 +142,36 @@ fn watch_cursor(window: tauri::WebviewWindow, state: Arc<HitState>) {
 }
 
 fn main() {
+    let instance = match host::Instance::acquire() {
+        Ok(Some(instance)) => instance, Ok(None) => return,
+        Err(error) => { eprintln!("single instance failed: {error}"); return; }
+    };
+    let runtime = match host::Runtime::new() {
+        Ok(runtime) => Arc::new(runtime),
+        Err(error) => { unsafe { windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(std::ptr::null_mut(),
+            error.encode_utf16().chain(Some(0)).collect::<Vec<_>>().as_ptr(),
+            "桌宠启动失败".encode_utf16().chain(Some(0)).collect::<Vec<_>>().as_ptr(),0); } return; }
+    };
     let state = Arc::new(HitState {
         ignoring: AtomicBool::new(false),
         enabled: AtomicBool::new(true),
         dragging: AtomicBool::new(false),
         resizing: AtomicBool::new(false),
         menu_open: AtomicBool::new(false),
+        stopped: AtomicBool::new(false),
     });
-    tauri::Builder::default()
+    let exit_runtime = runtime.clone();
+    let exit_state = state.clone();
+    let app = tauri::Builder::default()
         .manage(state.clone())
+        .manage(runtime.clone())
+        .manage(chat::ChatState::default())
         .invoke_handler(tauri::generate_handler![
-            set_hit_state, start_avatar_drag, open_pet_menu, resize::finish_resize, tray::sync_character_menu
+            set_hit_state, start_avatar_drag, open_pet_menu, resize::finish_resize, tray::sync_character_menu, chat::chat_snapshot, chat::chat_action, chat::sync_chat
         ])
         .setup(move |app| {
-            let url = "http://127.0.0.1:12393/vrm/".parse()?;
-            let window = WebviewWindowBuilder::new(app, "avatar", WebviewUrl::External(url))
-                .title("3D LLM Rust POC")
+            let window = WebviewWindowBuilder::new(app, "avatar", WebviewUrl::App("startup.html".into()))
+                .title("3D LLM Rust 桌宠")
                 .inner_size(520.0, 760.0)
                 .transparent(true)
                 .decorations(false)
@@ -163,6 +182,7 @@ fn main() {
                     if payload.event() != tauri::webview::PageLoadEvent::Finished {
                         return;
                     }
+                    if window.url().map(|url| url.host_str() != Some("127.0.0.1")).unwrap_or(true) { return; }
                     let overlay = format!(
                         r#"(() => {{
                           let style = document.getElementById('__pet-overlay');
@@ -176,18 +196,37 @@ fn main() {
                         include_str!("../../../desktop/pet-overlay.css")
                     );
                     if let Err(error) = window.eval(overlay) {
-                        eprintln!("pet overlay injection failed: {error}");
+                        crate::host::log(window.app_handle(), &format!("pet overlay injection failed: {error}"));
                     }
                     let bridge = include_str!("../../avatar-bridge.js");
                     if let Err(error) = window.eval(bridge) {
-                        eprintln!("bridge injection failed: {error}");
+                        window.app_handle().state::<Arc<host::Runtime>>().log(&format!("bridge injection failed: {error}"));
                     }
+                    if !window.is_visible().unwrap_or(false) { let _ = window.eval("window.__petHost?.freeze('hidden');"); }
+
                 })
                 .build()?;
+            host::restore(&window, &runtime, &state)?;
+            let avatar = window.clone();
+            let destroyed_state = state.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) { destroyed_state.stopped.store(true, Ordering::SeqCst); }
+            });
             tray::install(app, &window, state.clone())?;
-            watch_cursor(window, state.clone());
+            host::watch_host(window.clone(), state.clone(), runtime.clone(), instance);
+            host::start_backend(window.clone(), runtime.clone());
+            watch_cursor(avatar, state.clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Tauri POC failed");
+        .build(tauri::generate_context!())
+        .expect("Tauri host failed");
+    app.run(move |app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(window)=app.get_webview_window("avatar") {
+                if let Some(snapshot)=host::snapshot(&window,&exit_state) { exit_runtime.save(&snapshot); }
+            }
+            exit_state.stopped.store(true,Ordering::SeqCst);
+            exit_runtime.shutdown();
+        }
+    });
 }

@@ -4,7 +4,7 @@
   const invoke = (command, args) => window.__TAURI__.core.invoke(command, args)
     .catch(error => console.error(`Pet ${command} failed:`, error));
   let press = null;
-  let frozen = null;
+  const frozen = new Set();
   let menuOpen = false;
   const canvas = () => document.querySelector('#canvas-container canvas');
 
@@ -68,38 +68,34 @@
     }
   });
   window.addEventListener('__pet-pointer', event => {
-    if (press || frozen || menuOpen) return;
+    if (press || frozen.size || menuOpen) return;
     canvas()?.dispatchEvent(new PointerEvent('pointermove', {
       clientX: event.detail.x, clientY: event.detail.y, bubbles: true
     }));
   });
 
   window.__petHost = {
-    resetView() { document.getElementById('btn-reset-cam')?.click(); },
-    freeze() {
-      endPress();
-      if (frozen) return;
-      frozen = { request: window.requestAnimationFrame.bind(window),
-        cancel: window.cancelAnimationFrame.bind(window), pending: new Map(), next: -1 };
-      window.requestAnimationFrame = callback => {
-        const id = frozen.next--;
-        frozen.pending.set(id, callback);
-        return id;
-      };
-      window.cancelAnimationFrame = id => {
-        if (id < 0) frozen.pending.delete(id);
-        else frozen.cancel(id);
-      };
+    version: 1,
+    ready() { return window.__petRenderer?.snapshot() ?? {ready:false, connected:false}; },
+    resetView() { return window.__petRenderer?.resetView() ?? {ok:false,reason:'not-ready'}; },
+    freeze(reason='resize') {
+      endPress(); frozen.add(reason);
+      return window.__petRenderer?.setPaused(reason,true) ?? {ok:false,reason:'not-ready'};
     },
-    resume() {
-      if (!frozen) return;
-      const previous = frozen;
-      frozen = null;
-      window.requestAnimationFrame = previous.request;
-      window.cancelAnimationFrame = previous.cancel;
-      for (const callback of previous.pending.values()) previous.request(callback);
+    resume(reason='resize') {
+      frozen.delete(reason);
+      return window.__petRenderer?.setPaused(reason,false) ?? {ok:false,reason:'not-ready'};
     }
   };
+  const synchronize = () => {
+    for (const reason of frozen) window.__petRenderer?.setPaused(reason,true);
+    invoke('sync_chat', {message:{type:window.__petRenderer?.snapshot().connected ? 'desktop-connected' : 'desktop-disconnected'}});
+  };
+  window.addEventListener('desktop-bridge', event => {
+    if (event.detail?.type==='avatar.chat') invoke('sync_chat',{message:event.detail.message});
+    if (event.detail?.type==='avatar.ready') synchronize();
+  });
+  synchronize();
   // Injection may happen after the initial WebSocket messages were received.
   if (window.__petCharacters) invoke('sync_character_menu', window.__petCharacters.snapshot());
 })();

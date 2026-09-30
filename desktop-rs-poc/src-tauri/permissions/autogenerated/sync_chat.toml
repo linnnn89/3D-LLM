@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-chat"
+description = "Enables the sync_chat command without any pre-configured scope."
+commands.allow = ["sync_chat"]
+
+[[permission]]
+identifier = "deny-sync-chat"
+description = "Denies the sync_chat command without any pre-configured scope."
+commands.deny = ["sync_chat"]

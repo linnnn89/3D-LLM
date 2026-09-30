@@ -24,6 +24,7 @@ test('character menu follows server list and confirmation, and cannot switch whi
     const document = {createElement:()=>({getAttribute:()=>null})};
     const window = {dispatchEvent:event=>updates.push(event.detail)};
     class CustomEvent { constructor(type,options){this.detail=options.detail;} }
+    const publishDesktopChat = () => {};
     const applyCharacterUI = id => applied.push(id);
     ${section('function resolveCharacterId(', 'function updateMotionSelectForCharacter(')}
     ${section('function desktopCharacterSnapshot()', 'function initWebSocket()')}

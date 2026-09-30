@@ -1,8 +1,10 @@
 fn main() {
+    println!("cargo:rerun-if-changed=../../desktop/chat.html");
+    std::fs::copy("../../desktop/chat.html", "../ui/chat.html").expect("Bundle shared chat UI");
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(&[
-                "set_hit_state", "start_avatar_drag", "open_pet_menu", "finish_resize", "sync_character_menu",
+                "set_hit_state", "start_avatar_drag", "open_pet_menu", "finish_resize", "sync_character_menu", "chat_snapshot", "chat_action", "sync_chat",
             ])),
     )
     .expect("Tauri build configuration failed");

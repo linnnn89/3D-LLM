@@ -11,8 +11,11 @@ function createLogger(logFile, output = console, stdout = process.stdout) {
     if (error.code === 'EPIPE') consoleAvailable = false
   })
 
-  return function log(message) {
-    const line = `${new Date().toISOString()} ${message}`
+  // Serialize async writes and cap pending memory if storage becomes slow.
+  let pending = 0
+  let writes = Promise.resolve()
+  function log(message) {
+    const line = `${new Date().toISOString()} ${String(message).slice(0, 32768)}`
     if (consoleAvailable) {
       try {
         output.log(line)
@@ -21,13 +24,25 @@ function createLogger(logFile, output = console, stdout = process.stdout) {
         else throw error
       }
     }
-    try {
-      fs.mkdirSync(path.dirname(logFile), { recursive: true })
-      fs.appendFileSync(logFile, line + '\n')
-    } catch {
-      /* 日志失败不影响主流程 */
-    }
+    if (pending >= 256) return
+    pending++
+    writes = writes.then(async () => {
+      await fs.promises.mkdir(path.dirname(logFile), { recursive: true })
+      const bytes = Buffer.byteLength(line + '\n')
+      const size = await fs.promises.stat(logFile).then(stat => stat.size, () => 0)
+      if (size + bytes > 2 * 1024 * 1024) {
+        await fs.promises.rm(logFile + '.3', { force: true })
+        for (let i = 2; i >= 0; i--) {
+          const from = i ? logFile + '.' + i : logFile
+          try { await fs.promises.rename(from, logFile + '.' + (i + 1)) }
+          catch (error) { if (error.code !== 'ENOENT') throw error }
+        }
+      }
+      await fs.promises.appendFile(logFile, line.slice(0, 32768) + '\n')
+    }).catch(() => {}).finally(() => { pending-- })
   }
+  log.flush = () => writes
+  return log
 }
 
 module.exports = { createLogger }

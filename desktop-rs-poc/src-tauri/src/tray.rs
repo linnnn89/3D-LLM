@@ -75,7 +75,7 @@ fn switch_character(window: &WebviewWindow, file: &str) -> tauri::Result<()> {
     Ok(())
 }
 
-fn open_settings(app: &AppHandle, character: bool) {
+pub fn open_settings(app: &AppHandle, character: bool) {
     let app = app.clone();
     // WebView2 creation must not block the main thread's native menu callback.
     tauri::async_runtime::spawn(async move {
@@ -100,7 +100,7 @@ fn open_settings(app: &AppHandle, character: bool) {
             Ok(())
         })();
         if let Err(error) = result {
-            eprintln!("settings window failed: {error}");
+            crate::host::log(&app, &format!("settings window failed: {error}"));
         }
     });
 }
@@ -110,6 +110,7 @@ pub fn install(
     window: &WebviewWindow,
     state: Arc<HitState>,
 ) -> tauri::Result<()> {
+    let chat = MenuItem::with_id(app, "chat", "聊天… (Ctrl+Shift+Space)", true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "显示角色", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "隐藏角色", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "全局设置…", true, None::<&str>)?;
@@ -127,8 +128,8 @@ pub fn install(
         }),
     });
     let passthrough =
-        CheckMenuItem::with_id(app, "passthrough", "点击穿透", true, true, None::<&str>)?;
-    let on_top = CheckMenuItem::with_id(app, "on-top", "始终置顶", true, true, None::<&str>)?;
+        CheckMenuItem::with_id(app, "passthrough", "点击穿透", true, state.enabled.load(Ordering::SeqCst), None::<&str>)?;
+    let on_top = CheckMenuItem::with_id(app, "on-top", "始终置顶", true, window.is_always_on_top()?, None::<&str>)?;
     let center = MenuItem::with_id(app, "center", "恢复模型居中（默认视角与比例）", true, None::<&str>)?;
     let resize = MenuItem::with_id(app, "resize", "自由调整大小…", true, None::<&str>)?;
     let help = MenuItem::with_id(app, "mouse-help", "左键拖动窗口 · Alt+拖动视角 · 滚轮缩放", false, None::<&str>)?;
@@ -138,6 +139,7 @@ pub fn install(
     let menu = Menu::with_items(
         app,
         &[
+            &chat,
             &show,
             &hide,
             &characters,
@@ -185,13 +187,12 @@ pub fn install(
                     return switch_character(&window, file);
                 }
                 match event.id.as_ref() {
-                    "show" => {
-                        window.set_ignore_cursor_events(false)?;
-                        state.ignoring.store(false, Ordering::SeqCst);
-                        window.unminimize()?;
-                        window.show()?;
+                    "chat" => crate::chat::open(app),
+                    "show" => show_avatar(&window, &state)?,
+                    "hide" => {
+                        window.eval("window.__petHost?.freeze('hidden');")?;
+                        window.hide()?;
                     }
-                    "hide" => window.hide()?,
                     "small" => window.set_size(LogicalSize::new(340.0, 500.0))?,
                     "medium" => window.set_size(LogicalSize::new(520.0, 760.0))?,
                     "large" => window.set_size(LogicalSize::new(700.0, 1000.0))?,
@@ -217,7 +218,7 @@ pub fn install(
                         // WebView2 window creation must leave the native menu callback first.
                         tauri::async_runtime::spawn(async move {
                             if let Err(error) = resize::begin(&avatar, &state) {
-                                eprintln!("resize editor failed: {error}");
+                                crate::host::log(avatar.app_handle(), &format!("resize editor failed: {error}"));
                             }
                         });
                     }
@@ -234,9 +235,18 @@ pub fn install(
                 Ok(())
             })();
             if let Err(error) = result {
-                eprintln!("tray action {} failed: {error}", event.id.as_ref());
+                app.state::<Arc<crate::host::Runtime>>().log(&format!("tray action {} failed: {error}", event.id.as_ref()));
             }
         })
         .build(app)?;
+    Ok(())
+}
+
+pub fn show_avatar(window: &WebviewWindow, state: &HitState) -> tauri::Result<()> {
+    window.set_ignore_cursor_events(false)?;
+    state.ignoring.store(false, Ordering::SeqCst);
+    window.unminimize()?;
+    window.show()?;
+    window.eval("window.__petHost?.resume('hidden');")?;
     Ok(())
 }

@@ -1,8 +1,21 @@
 # Rust / Tauri 2 desktop pet POC
 
-This experiment loads the existing Python server's `/vrm/` page at
-`http://127.0.0.1:12393/vrm/`. Start that server separately before running the POC.
-The POC does not start or alter Python and does not replace `desktop/`.
+The Rust host loads the existing Python server's `/vrm/` page at
+`http://127.0.0.1:12393/vrm/`. Run `app/桌宠-Rust.exe` inside this repository,
+or `cargo run` from `desktop-rs-poc/src-tauri`. The host resolves the repository
+from its executable directory (then working directory), reuses a ready backend,
+or starts the existing `.venv/Scripts/python.exe`. HTTP readiness checks the
+renderer script before navigating; startup waits up to 120 seconds and displays
+errors in the startup window. No environment installation is performed. Host-started
+Python runs offline for Hugging Face assets; install required models separately.
+Python stderr is not copied into a second host file. Backend details use
+`logs/backend_*.log`; failures before logger initialization may require starting
+`run_server.py` in a terminal for diagnostics.
+
+A Windows named mutex prevents duplicate hosts. Starting again requests the
+existing avatar to show. A Windows Job Object owns only the backend started by
+this host and its descendants; exiting releases them. An externally started
+backend remains running. This does not replace the Electron startup shortcut.
 
 From `desktop-rs-poc/src-tauri`, run `cargo run`. The single transparent,
 always-on-top window receives explicit `avatar.hit_state` events from the renderer.
@@ -16,8 +29,25 @@ The notification-area icon opens a native menu on left or right click. It provid
 show/hide, three size presets, click-through and always-on-top switches, model-view reset,
 page reload, global/character settings, and exit. Settings reuse the existing
 backend pages in separate normal windows; saving requires the real Python API.
-Window preferences are session-only in this POC. Electron's chat window, framing
-presets and global shortcuts have not been migrated yet.
+Window position, size, click-through and always-on-top are saved after stable
+changes to `%LOCALAPPDATA%/3D-LLM-Rust/pet-state.json`. Saved positions are restored
+only when the full window fits a current monitor work area; otherwise it is centered.
+Rust does not read or overwrite Electron's preferences.
+
+“聊天…” opens the shared `desktop/chat.html` UI, bundled by the Tauri build.
+Its Tauri adapter relays text, PCM microphone blocks and interruption through the
+avatar's existing WebSocket, and relays display/status events back to the chat
+window. No second conversation connection is created. The host keeps at most
+300 display messages in memory. Hide, blur auto-hide and close stop microphone
+capture. Collapse and pin are session preferences. The chat window is 400×240,
+collapsible to 400×58. Chat and resize capabilities are local-only.
+
+Global shortcuts: Ctrl+Shift+Space toggles chat; Ctrl+Shift+R opens the resize
+frame (press again to cancel); Ctrl+Shift+S opens settings. Shortcut conflicts
+are recorded in the bounded host log; tray actions remain available.
+Electron's bust/half/full framing presets and desktop corner-docking action
+are still not migrated. The avatar remains focusable and present in Alt+Tab;
+no claim of non-activation is made.
 
 The tray and right-click menu share a “切换角色” submenu populated from the
 backend's existing character list. It sends switch-config over the avatar's
@@ -48,7 +78,12 @@ continually moving the model to the left. One-shot motion translations are prese
 “自由调整大小…” opens a separate transparent virtual frame on the avatar's current
 monitor. Drag its corners to scale with the current aspect ratio, or drag the frame
 to move it. Enter/确认 applies once; Escape/取消 closes without changing the avatar.
-The avatar's animation loop is paused while the frame is open and resumes on exit.
+The renderer's own animation loop pauses while the frame is open. Hidden and
+resize pauses have independent reasons: leaving resize does not resume a hidden
+avatar. Show resumes the hidden reason, resets the frame delta and preserves the
+WebSocket/audio conversation. The host no longer replaces global
+`requestAnimationFrame`; unrelated page callbacks continue. Hidden cursor probing
+backs off to 250 ms, visible probing uses 33 ms, and destruction/exit stops it.
 The editor temporarily receives input over that monitor's work area. It uses local
 bundled assets and a separate capability: the remote avatar page cannot apply bounds.
 
@@ -75,3 +110,27 @@ capability cannot narrow the grant to `/vrm/` alone.
 This is experimental. Do not use it as the production desktop host until WebGL
 transparency and precise click-through pass the Windows device tests described in
 the migration plan, including VRM/PMX, hide/show, DPI, monitor changes, and sleep.
+
+Bridge contracts are in `protocol/desktop-bridge.schema.json`. `avatar.ready`
+announces the versioned API; `__petRenderer.snapshot()` reports scene readiness,
+connection and pause reasons. `resetView`, `setPaused` and `send` return explicit
+results. The host's `__petHost` delegates to these methods rather than hidden DOM
+buttons. Display relay deliberately excludes encoded audio payloads.
+
+Logging policy: entry points configure Loguru once, INFO normally and DEBUG only
+with `run_server.py --verbose`. Exception local-variable dumps are disabled.
+Backend/explicit-upgrade logs rotate at 2 MB; closed files are retained up to
+14 days and a 20 MB budget, checked at startup/rotation. The active file can add
+approximately 2 MB. Legacy `debug_*`, `upgrade_*` files and manually redirected
+probe logs are left intact. Chat history and backups are not log-cleanup targets.
+Rust's sparse host diagnostics use `%LOCALAPPDATA%/3D-LLM-Rust/host.log` with
+1 MB rotation and two backups. Electron writes asynchronously with 2 MB rotation
+and three backups, and drains Python stdout/stderr without duplicating their
+contents. Chat history still lives in the repository `chat_history/` directory;
+it is not part of the Documents storage migration.
+
+`cargo test --release --locked --test native-host` runs real WebView2 startup,
+single-instance, state persistence, independent pause reasons and shared chat UI
+native IPC scenarios. It uses a temporary host state directory and hidden WebView2/chat test windows,
+without acquiring foreground focus. It replaces renderer sending for the test text, so it does not
+make LLM requests or validate real ASR/TTS. Run with no Rust pet already open.

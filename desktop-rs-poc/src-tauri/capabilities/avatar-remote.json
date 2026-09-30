@@ -4,5 +4,5 @@
   "windows": ["avatar"],
   "local": false,
   "remote": { "urls": ["http://127.0.0.1:12393/*"] },
-  "permissions": ["allow-set-hit-state", "allow-start-avatar-drag", "allow-open-pet-menu", "allow-sync-character-menu"]
+  "permissions": ["allow-set-hit-state", "allow-start-avatar-drag", "allow-open-pet-menu", "allow-sync-character-menu", "allow-sync-chat"]
 }

@@ -9,9 +9,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 serde_json = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Security", "Win32_System_Threading", "Win32_System_JobObjects"] }
 
 [[test]]
 name = "native-camera"
 path = "tests/native-camera.rs"
+harness = false
+
+[[test]]
+name = "native-host"
+path = "tests/native-host.rs"
 harness = false

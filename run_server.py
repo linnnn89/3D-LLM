@@ -96,7 +96,6 @@ from src.open_llm_vtuber.config_manager import Config, read_yaml, validate_confi
 os.environ["HF_HOME"] = str(Path(__file__).parent / "models")
 os.environ["MODELSCOPE_CACHE"] = str(Path(__file__).parent / "models")
 
-upgrade_manager = UpgradeManager()
 
 
 def get_version() -> str:
@@ -106,25 +105,8 @@ def get_version() -> str:
 
 
 def init_logger(console_log_level: str = "INFO") -> None:
-    logger.remove()
-    # Console output
-    logger.add(
-        sys.stderr,
-        level=console_log_level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | {message}",
-        colorize=True,
-    )
-
-    # File output
-    logger.add(
-        "logs/debug_{time:YYYY-MM-DD}.log",
-        rotation="10 MB",
-        retention="30 days",
-        level="DEBUG",
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message} | {extra}",
-        backtrace=True,
-        diagnose=True,
-    )
+    from src.open_llm_vtuber.logging_config import configure_logging
+    configure_logging(console_log_level)
 
 
 def check_frontend_assets():
@@ -168,7 +150,7 @@ def run(console_log_level: str):
 
     # Sync user config with default config
     try:
-        upgrade_manager.sync_user_config()
+        UpgradeManager().sync_user_config()
     except Exception as e:
         logger.error(f"Error syncing user config: {e}")
 
@@ -204,12 +186,6 @@ def run(console_log_level: str):
 if __name__ == "__main__":
     args = parse_args()
     console_log_level = "DEBUG" if args.verbose else "INFO"
-    if args.verbose:
-        logger.info("Running in verbose mode")
-    else:
-        logger.info(
-            "Running in standard mode. For detailed debug logs, use: uv run run_server.py --verbose"
-        )
     if args.hf_mirror:
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     run(console_log_level=console_log_level)

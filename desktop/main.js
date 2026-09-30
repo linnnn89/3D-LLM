@@ -1210,7 +1210,13 @@ if (!gotLock) {
   // 托盘常驻：窗口被关掉也不退出
   app.on('window-all-closed', () => {})
 
-  app.on('before-quit', () => {
+  let loggerFlushed = false
+  app.on('before-quit', (event) => {
+    if (!loggerFlushed) {
+      event.preventDefault()
+      log.flush().finally(() => { loggerFlushed = true; app.quit() })
+      return
+    }
     if (!quitting) stopBackend()
   })
 

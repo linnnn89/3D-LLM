@@ -168,4 +168,6 @@ def run_upgrade():
 
 
 if __name__ == "__main__":
+    from src.open_llm_vtuber.logging_config import configure_logging
+    configure_logging("INFO", prefix="upgrade")
     run_upgrade()

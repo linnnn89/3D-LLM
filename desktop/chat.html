@@ -227,6 +227,8 @@
   const collapseEl = $('btn-collapse')
   const pinEl = $('btn-pin')
 
+  let captureGeneration = 0
+  let pendingCapture = false
   let recording = false
   let mediaStream = null
   let audioContext = null
@@ -292,16 +294,24 @@
   // 停止时发 mic-audio-end 让后端跑 ASR。格式不一致会导致识别结果乱码。
 
   async function startRecording() {
+    if (pendingCapture || recording) return
+    pendingCapture = true
+    const generation = captureGeneration
+    let stream
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, sampleRate: 16000 }
       })
     } catch (error) {
+      pendingCapture = false
       setStatus('麦克风不可用')
       console.error('[chat] getUserMedia 失败', error)
       return
     }
 
+    pendingCapture = false
+    if (generation !== captureGeneration) { stream.getTracks().forEach(track => track.stop()); return }
+    mediaStream = stream
     const AudioCtx = window.AudioContext || window.webkitAudioContext
     audioContext = new AudioCtx({ sampleRate: 16000 })
     const source = audioContext.createMediaStreamSource(mediaStream)
@@ -324,6 +334,7 @@
   }
 
   function stopRecording() {
+    captureGeneration++
     if (!recording && !mediaStream) return
     recording = false
     if (autoStopTimer) {
@@ -397,10 +408,20 @@
   })
 
   // 关闭窗口前先停录音，避免留下悬挂的麦克风
-  window.addEventListener('beforeunload', () => { if (recording) stopRecording() })
+  window.addEventListener('beforeunload', stopRecording)
 
   // ------------------------------------------------------------ 初始化
 
+  window.addEventListener('pet-chat-error', event => { setStatus('出错'); appendEntry({role:'system',text:event.detail}); });
+  if (window.__TAURI__) {
+    window.__TAURI__.event.listen('chat-hidden', stopRecording);
+    document.querySelector('#header')?.setAttribute('data-tauri-drag-region','');
+    document.addEventListener('mousedown', event => {
+      if (event.button===0 && event.target.closest('[data-tauri-drag-region]') && !event.target.closest('button')) {
+        window.__TAURI__.window.getCurrentWindow().startDragging();
+      }
+    });
+  }
   api.onAppend(appendEntry)
   api.onStatus(setStatus)
 

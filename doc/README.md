@@ -11,6 +11,7 @@ For full documentation, please visit our [documentation site](https://open-llm-v
 - [VRM 骨骼动作制作指南（打骨架 / 做动作）](vrm_motion_guide.md) —— 归一化骨骼与 VRM 版本基差、`.vrma` 与程序化两条路径、工具 API、几何硬约束（取景/臂长/出画）与验收流程
 
 ## 桌宠 / Desktop Pet
+- [当前 Rust/Tauri 桌宠实现与运行说明](../desktop-rs-poc/README.md) —— 当前功能、宿主生命周期、日志策略、验证方式与仍未移植项；以下研究文档保留其原有时间语境。
 - [Windows 3D AI 桌宠 — 架构研究与可行性分析](desktop_pet_feasibility_20260918.md) —— 仓库审计、Renderer 选型（为何选 Electron 而非 Godot / Unity / Lively）、能力清单与开发路线
 - [无框窗口 UI 工程规范](desktop_pet_ui_design_20260918.md) —— 透明 / 穿透 / 拖动 / 分层 / z-order 的工程约束，§12 为逐项实测结果
 

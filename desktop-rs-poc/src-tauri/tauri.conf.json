@@ -7,7 +7,7 @@
   "app": {
     "windows": [],
     "withGlobalTauri": true,
-    "security": { "capabilities": ["avatar-remote", "resize-local"] }
+    "security": { "capabilities": ["avatar-remote", "resize-local", "chat-local"] }
   },
   "bundle": { "active": false, "icon": [] }
 }

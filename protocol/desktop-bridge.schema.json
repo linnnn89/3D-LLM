@@ -1,12 +1,122 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://3d-llm.local/protocol/desktop-bridge.schema.json",
-  "title": "Implemented avatar hit state event",
-  "type": "object",
-  "required": ["type", "hit"],
-  "properties": {
-    "type": { "const": "avatar.hit_state" },
-    "hit": { "type": "boolean" }
-  },
-  "additionalProperties": false
+  "title": "Desktop renderer events (version 1)",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "hit"
+      ],
+      "properties": {
+        "type": {
+          "const": "avatar.hit_state"
+        },
+        "hit": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "options",
+        "active",
+        "connected"
+      ],
+      "properties": {
+        "type": {
+          "const": "avatar.characters"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "active": {
+          "type": "string"
+        },
+        "connected": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "version"
+      ],
+      "properties": {
+        "type": {
+          "const": "avatar.ready"
+        },
+        "version": {
+          "const": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "const": "avatar.chat"
+        },
+        "message": {
+          "type": "object",
+          "required": [
+            "type",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "full-text",
+                "audio",
+                "user-input-transcription",
+                "control",
+                "error",
+                "desktop-connected",
+                "desktop-disconnected"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "display_text": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
 }

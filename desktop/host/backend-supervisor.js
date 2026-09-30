@@ -39,13 +39,9 @@ function createBackendSupervisor({ projectRoot, host, port, log }) {
     processHandle = child
     startedByUs = true
 
-    for (const [stream, tag] of [[child.stdout, 'out'], [child.stderr, 'err']]) {
-      stream.setEncoding('utf8')
-      stream.on('data', (chunk) => {
-        const message = String(chunk).trim()
-        if (message) log(`[backend:${tag}] ${message}`)
-      })
-    }
+    // Python owns detailed backend logs. Drain pipes without saving another copy.
+    child.stdout.resume()
+    child.stderr.resume()
     child.on('error', (error) => {
       log(`[backend] 启动失败: ${error.message}`)
       if (processHandle === child) processHandle = null

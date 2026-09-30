@@ -1882,6 +1882,7 @@ function initWebSocket() {
 
     ws.onopen = () => {
       publishDesktopCharacters();
+      publishDesktopChat({type:'desktop-connected'});
       console.log('✅ Connected to Open-LLM-VTuber WebSocket');
       updateStatus('connected', '在线就绪');
       ws.send(JSON.stringify({
@@ -1916,6 +1917,7 @@ function initWebSocket() {
 
     ws.onclose = () => {
       publishDesktopCharacters();
+      publishDesktopChat({type:'desktop-disconnected'});
       stopAudioPlayback();
       console.warn('WebSocket closed. Reconnecting in 3s...');
       updateStatus('disconnected', '连接断开 (重连中)');
@@ -1929,6 +1931,8 @@ function initWebSocket() {
 }
 
 function handleServerMessage(data) {
+  // Forward display/status data only; audio bytes stay in this viewport.
+  publishDesktopChat(data);
   const type = data.type;
 
   switch (type) {
@@ -2368,8 +2372,38 @@ function applyBackgroundTheme(themeKey) {
 }
 
 // --- 10. Animation Render Loop ---
+const renderPauseReasons = new Set();
+let renderFrame = null;
+function publishDesktopChat(data) {
+  if (!['full-text','audio','user-input-transcription','control','error','desktop-connected','desktop-disconnected'].includes(data.type)) return;
+  window.dispatchEvent(new CustomEvent('desktop-bridge', {detail:{type:'avatar.chat', message:{
+    type:data.type, text:typeof data.text === 'string' ? data.text : '',
+    display_text: data.display_text ? {text:data.display_text.text} : undefined
+  }}}));
+}
+window.__petRenderer = {
+  version: 1,
+  snapshot() { return {ready:!!renderer, connected:ws?.readyState===WebSocket.OPEN, paused:[...renderPauseReasons]}; },
+  resetView() { if (!renderer) return {ok:false,reason:'not-ready'}; resetCamera(); return {ok:true}; },
+  setPaused(reason, paused) {
+    if (paused) { renderPauseReasons.add(reason); if (renderFrame!==null) cancelAnimationFrame(renderFrame); renderFrame=null; }
+    else { renderPauseReasons.delete(reason); if (!renderPauseReasons.size && renderer && renderFrame===null) { clock.getDelta(); animate(); } }
+    return {ok:true,paused:[...renderPauseReasons]};
+  },
+  send(message) {
+    if (ws?.readyState!==WebSocket.OPEN) { publishDesktopChat({type:'error',text:'连接尚未就绪，消息未发送'}); return {ok:false,reason:'disconnected'}; }
+    if (message.type==='text-input') sendTextMessage(message.text);
+    else if (message.type==='interrupt-signal') interruptSpeech();
+    else if (['mic-audio-data','mic-audio-end'].includes(message.type)) ws.send(JSON.stringify(message));
+    else return {ok:false,reason:'unsupported-message'};
+    return {ok:true};
+  }
+};
+window.dispatchEvent(new CustomEvent('desktop-bridge',{detail:{type:'avatar.ready',version:1}}));
+
 function animate() {
-  requestAnimationFrame(animate);
+  if (renderPauseReasons.size) { renderFrame=null; return; }
+  renderFrame = requestAnimationFrame(animate);
 
   const rawDelta = clock.getDelta();
   const delta = clampFrameDelta(rawDelta, 0.1);

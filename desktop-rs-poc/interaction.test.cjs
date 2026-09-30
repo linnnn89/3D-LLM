@@ -21,6 +21,7 @@ const http = require('node:http');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'vrm_frontend/app.js'), 'utf8');
 const clickInteraction = source.slice(source.indexOf('function initClickInteraction()'), source.indexOf('// --- 5. WebSocket'));
+const renderLoop = source.slice(source.indexOf('const renderPauseReasons'), source.indexOf("window.addEventListener('DOMContentLoaded'"));
 const resetCamera = source.slice(source.indexOf('function resetCamera()'), source.indexOf('// --- 7. Microphone'));
 const server = http.createServer((request, response) => {
   const routes = {
@@ -59,7 +60,10 @@ async function viewport() {
     map.textContent = JSON.stringify({imports:{three:'/three.js'}}); document.head.appendChild(map);
     const THREE = await import('/three.js');
     const { OrbitControls } = await import('/controls.js');
-    const renderer = {domElement:document.querySelector('canvas')};
+    const renderer = {domElement:document.querySelector('canvas'),render(){ window.frames++; }};
+    window.frames=0;
+    const scene={}; const clock=new THREE.Clock(); const clampFrameDelta=(d,max)=>Math.min(d,max);
+    let ws=null; const sendTextMessage=()=>{},interruptSpeech=()=>{};
     const camera = new THREE.PerspectiveCamera(30, 600/800, 0.1, 20);
     camera.position.set(0,1.36,1.25);
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -74,6 +78,8 @@ async function viewport() {
     const handleModelClick = () => window.clicks++;
     ${clickInteraction}
     ${resetCamera}
+    ${renderLoop}
+    animate();
     initClickInteraction();
     document.getElementById('btn-reset-cam').onclick = resetCamera;
   })()`);
@@ -177,18 +183,20 @@ test('reset restores camera target, orientation and zoom with no residual dampin
     assert.equal(result.zoom, 1);
     assert.equal(result.damping, true);
     const animation = await window.webContents.executeJavaScript(`(async () => {
-      let frames = 0;
-      window.__petHost.freeze();
-      requestAnimationFrame(() => frames++);
-      const canceled = requestAnimationFrame(() => frames += 100);
-      cancelAnimationFrame(canceled);
-      await new Promise(resolve => setTimeout(resolve, 40));
-      const paused = frames;
-      window.__petHost.resume();
-      await new Promise(resolve => requestAnimationFrame(resolve));
-      return {paused, resumed:frames};
+      const original=requestAnimationFrame;
+      window.__petHost.freeze('hidden'); window.__petHost.freeze('resize');
+      const before=window.frames;
+      let unrelated=0; requestAnimationFrame(()=>unrelated++);
+      await new Promise(resolve=>setTimeout(resolve,40));
+      const paused=window.frames===before;
+      window.__petHost.resume('resize');
+      await new Promise(resolve=>setTimeout(resolve,40));
+      const stillPaused=window.frames===before;
+      window.__petHost.resume('hidden');
+      await new Promise(resolve=>setTimeout(resolve,40));
+      return {paused,stillPaused,resumed:window.frames>before,unrelated,untouched:original===requestAnimationFrame};
     })()`);
-    assert.deepEqual(animation, {paused:0,resumed:1});
+    assert.deepEqual(animation, {paused:true,stillPaused:true,resumed:true,unrelated:1,untouched:true});
   } finally { window.destroy(); }
 }));
 
