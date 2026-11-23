@@ -1,6 +1,8 @@
+import json
 import os
 import re
-import json
+import stat
+import tempfile
 import uuid
 from datetime import datetime
 from typing import Literal, List, TypedDict, Optional
@@ -97,7 +99,7 @@ def store_message(
     content: str,
     name: str | None = None,
     avatar: str | None = None,
-):
+) -> None:
     """Store a message in a specific history file
 
     Args:
@@ -118,14 +120,27 @@ def store_message(
     filepath = _get_safe_history_path(conf_uid, history_uid)
     logger.debug(f"Storing {role} message to {filepath}")
 
-    history_data = []
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                history_data = json.load(f)
-        except Exception:
-            logger.error(f"Failed to load history file: {filepath}")
-            pass
+    mode = None
+    try:
+        with open(filepath, encoding="utf-8") as history:
+            mode = stat.S_IMODE(os.fstat(history.fileno()).st_mode)
+            history_data = json.load(history)
+    except FileNotFoundError:
+        if mode is not None or os.path.lexists(filepath):
+            logger.error(
+                f"Message not saved: existing history could not be read: {filepath}"
+            )
+            return
+        history_data = []
+    except Exception as exc:
+        logger.error(
+            f"Message not saved: cannot read history {filepath} ({type(exc).__name__})"
+        )
+        return
+
+    if not isinstance(history_data, list):
+        logger.error(f"Message not saved: expected a JSON list in {filepath}")
+        return
 
     now_str = datetime.now().isoformat(timespec="seconds")
     new_item = {
@@ -142,9 +157,30 @@ def store_message(
 
     history_data.append(new_item)
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(history_data, f, ensure_ascii=False, indent=2)
+    _write_history_atomically(filepath, history_data, mode)
     logger.debug(f"Successfully stored {role} message")
+
+
+def _write_history_atomically(
+    filepath: str, history_data: list, mode: int | None
+) -> None:
+    if mode is not None and not os.access(filepath, os.W_OK):
+        raise PermissionError(f"History file is not writable: {filepath}")
+
+    staged = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=os.path.dirname(filepath), delete=False
+    )
+    try:
+        with staged:
+            json.dump(history_data, staged, ensure_ascii=False, indent=2)
+            staged.flush()
+            if mode is not None:
+                os.chmod(staged.name, mode & 0o777)
+            os.fsync(staged.fileno())
+        os.replace(staged.name, filepath)
+    except BaseException:
+        os.unlink(staged.name)
+        raise
 
 
 def get_metadata(conf_uid: str, history_uid: str) -> dict:
